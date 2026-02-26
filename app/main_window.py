@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
             ("English",           "en"),
             ("Korean",            "ko"),
             ("Japanese",          "ja"),
+            ("Vietnamese",        "vi"),
         ]
         self.lang_combo = QComboBox()
         self.lang_combo.setFixedHeight(32)
