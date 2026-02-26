@@ -2,14 +2,18 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sys
 import time
+import traceback
 from typing import List
 
 from PySide6.QtCore import QObject, Signal
 
 from app.models.caption import Caption
+
+logger = logging.getLogger(__name__)
 
 # Load libs/googletrans/main.py directly to avoid name clash with libs/whisper/main.py
 _TRANS_MAIN = os.path.normpath(
@@ -47,6 +51,7 @@ class TranslateWorker(QObject):
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
+        logger.info("TranslateWorker starting — %d captions", len(self._captions))
         try:
             total = len(self._captions) or 1
 
@@ -62,21 +67,32 @@ class TranslateWorker(QObject):
                             break
                     except Exception as exc:
                         last_exc = exc
+                        logger.warning(
+                            "Translation attempt %d/%d failed for caption %d: %s",
+                            attempt, self.MAX_RETRIES, cap.index, exc,
+                        )
                         if attempt < self.MAX_RETRIES:
                             time.sleep(self.RETRY_DELAY)
 
                 if translated:
                     self.caption_translated.emit(cap.index, translated)
                 else:
-                    # All retries exhausted – skip silently
+                    # All retries exhausted – skip
+                    logger.error(
+                        "Caption %d skipped — all %d translation attempts failed. Last error: %s",
+                        cap.index, self.MAX_RETRIES, last_exc,
+                    )
                     self.caption_skipped.emit(cap.index)
 
                 pct = int((i + 1) / total * 100)
                 self.progress.emit(pct)
 
+            logger.info("TranslateWorker done")
             self.progress.emit(100)
 
         except Exception as exc:
+            logger.error("TranslateWorker failed: %s", exc)
+            logger.debug(traceback.format_exc())
             self.error.emit(str(exc))
         finally:
             self.finished.emit()

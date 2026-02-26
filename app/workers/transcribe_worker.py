@@ -1,13 +1,17 @@
 """QThread worker: transcribe a video file using openai-whisper."""
 from __future__ import annotations
 
+import logging
 import os
 import sys
+import traceback
 from typing import List
 
 from PySide6.QtCore import QObject, QThread, Signal
 
 from app.models.caption import Caption
+
+logger = logging.getLogger(__name__)
 
 # Add libs/whisper to path so we can reuse load_model
 _WHISPER_LIB = os.path.normpath(
@@ -40,13 +44,17 @@ class TranscribeWorker(QObject):
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
+        logger.info("TranscribeWorker starting — video=%s  model=%s", self._video_path, self._model_name)
         try:
             from main import load_model  # from libs/whisper/main.py
 
             self.progress.emit(5)
+            logger.info("Loading Whisper model '%s'…", self._model_name)
             model, device = load_model(self._model_name)
+            logger.info("Whisper model loaded on device=%s", device)
             self.progress.emit(20)
 
+            logger.info("Transcribing audio track…")
             result = model.transcribe(
                 self._video_path,
                 language="zh",          # Chinese (Mandarin)
@@ -57,6 +65,7 @@ class TranscribeWorker(QObject):
 
             segments = result.get("segments", [])
             total    = len(segments) or 1
+            logger.info("Transcription produced %d segments", len(segments))
             captions: List[Caption] = []
 
             for i, seg in enumerate(segments, start=1):
@@ -71,9 +80,12 @@ class TranscribeWorker(QObject):
                 self.progress.emit(20 + int(i / total * 75))
 
             self.progress.emit(100)
+            logger.info("TranscribeWorker done — %d captions", len(captions))
             self.captions_ready.emit(captions)
 
         except Exception as exc:
+            logger.error("TranscribeWorker failed: %s", exc)
+            logger.debug(traceback.format_exc())
             self.error.emit(str(exc))
         finally:
             self.finished.emit()

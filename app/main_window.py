@@ -6,7 +6,7 @@ import tempfile
 from typing import List, Optional
 
 from PySide6.QtCore import QObject, QThread, Qt, Slot
-from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -24,8 +24,12 @@ from PySide6.QtWidgets import (
 from app.models.caption import Caption
 from app.widgets.caption_table import CaptionTable
 from app.widgets.loading_dialog import LoadingDialog
+from app.widgets.log_viewer import LogViewerDialog
 from app.widgets.video_player import VideoPlayer
 from app.workers.tts_worker import KHMER_VOICES, DEFAULT_VOICE
+
+# Resolve logo path relative to this file
+_IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +41,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Khmer AI Video Dubber")
         self.resize(1400, 800)
 
+        # Window icon
+        logo_path = os.path.join(_IMAGES_DIR, "logo.jpg")
+        if os.path.exists(logo_path):
+            self.setWindowIcon(QIcon(logo_path))
+
         self._video_path: Optional[str] = None
         self._tts_dir: Optional[str] = None     # temp dir for TTS audio files
         self._busy = False
@@ -46,6 +55,7 @@ class MainWindow(QMainWindow):
         self._worker: Optional[QObject] = None
 
         self.setAcceptDrops(True)
+        self._log_viewer: LogViewerDialog | None = None
         self._build_ui()
         self._setup_menu()
         self._setup_statusbar()
@@ -154,6 +164,19 @@ class MainWindow(QMainWindow):
         quit_act.setShortcut(QKeySequence.Quit)
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
+
+        help_menu = menu.addMenu("&Help")
+        logs_act = QAction("View &Logs…", self)
+        logs_act.setShortcut(QKeySequence("Ctrl+L"))
+        logs_act.triggered.connect(self._on_view_logs)
+        help_menu.addAction(logs_act)
+
+    def _on_view_logs(self) -> None:
+        if self._log_viewer is None:
+            self._log_viewer = LogViewerDialog(self)
+        self._log_viewer.show()
+        self._log_viewer.raise_()
+        self._log_viewer.activateWindow()
 
     def _setup_statusbar(self) -> None:
         self.status_label = QLabel("Ready — drop a video file or click Load Video.")

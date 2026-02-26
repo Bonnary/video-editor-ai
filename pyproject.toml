@@ -12,6 +12,7 @@ dependencies = [
     "edge-tts",               # Khmer TTS (Microsoft Edge Neural voices)
     "pyside6",                # Qt6 UI framework
     "ffmpeg-python",          # FFmpeg Python bindings for export
+    "pyinstaller"
 ]
 
 # -------------------\--------------------------------------------------------

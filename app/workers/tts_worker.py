@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
+import traceback
 from typing import List
 
 from PySide6.QtCore import QObject, Signal
 
 from app.models.caption import Caption
+
+logger = logging.getLogger(__name__)
 
 # Edge TTS Khmer voices
 KHMER_VOICES = {
@@ -47,6 +51,7 @@ class TTSWorker(QObject):
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
+        logger.info("TTSWorker starting — %d captions, voice=%s", len(self._captions), self._voice)
         try:
             import edge_tts
 
@@ -74,11 +79,16 @@ class TTSWorker(QObject):
                         asyncio.run(communicate.save(out_path))
                         break  # success
                     except Exception as exc:
+                        logger.warning(
+                            "TTS attempt %d/%d failed for caption %d: %s",
+                            attempt + 1, max_retries, cap.index, exc,
+                        )
                         if attempt == max_retries - 1:
                             raise
                         wait = 2 ** attempt  # 1s, 2s, 4s, 8s …
                         time.sleep(wait)
 
+                logger.debug("TTS caption %d → %s", cap.index, out_path)
                 self.caption_audio_ready.emit(cap.index, out_path)
                 self.progress.emit(int((i + 1) / total * 100))
 
@@ -86,9 +96,12 @@ class TTSWorker(QObject):
                 if i < len(self._captions) - 1:
                     time.sleep(0.5)
 
+            logger.info("TTSWorker done")
             self.progress.emit(100)
 
         except Exception as exc:
+            logger.error("TTSWorker failed: %s", exc)
+            logger.debug(traceback.format_exc())
             self.error.emit(str(exc))
         finally:
             self.finished.emit()
