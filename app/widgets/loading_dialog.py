@@ -1,11 +1,12 @@
 """Modal loading dialog shown during long background tasks."""
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QLabel,
     QProgressBar,
+    QPushButton,
     QVBoxLayout,
 )
 
@@ -19,8 +20,11 @@ class LoadingDialog(QDialog):
                         message="Transcribing audio with Whisper…\\nThis may take a while.")
     worker.progress.connect(dlg.set_progress)
     worker.finished.connect(dlg.close)
+    dlg.cancel_requested.connect(some_slot)
     dlg.show()          # non-blocking show; the worker runs in a QThread
     """
+
+    cancel_requested = Signal()
 
     def __init__(
         self,
@@ -40,7 +44,6 @@ class LoadingDialog(QDialog):
         self.setWindowTitle(title)
         self.setModal(True)
         self.setMinimumWidth(360)
-        self.setFixedHeight(130)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
@@ -57,6 +60,13 @@ class LoadingDialog(QDialog):
         self._bar.setTextVisible(True)
         layout.addWidget(self._bar)
 
+        self._cancel_btn = QPushButton("\U0001f6ab  Cancel")
+        self._cancel_btn.setFixedHeight(30)
+        self._cancel_btn.clicked.connect(self._on_cancel_clicked)
+        layout.addWidget(self._cancel_btn)
+
+        self.adjustSize()
+
     # ------------------------------------------------------------------ slots
     def set_progress(self, value: int) -> None:
         """Update the progress bar (0–100)."""
@@ -65,3 +75,8 @@ class LoadingDialog(QDialog):
     def set_message(self, text: str) -> None:
         """Update the status message."""
         self._label.setText(text)
+
+    def _on_cancel_clicked(self) -> None:
+        self._cancel_btn.setEnabled(False)
+        self._cancel_btn.setText("Cancelling\u2026")
+        self.cancel_requested.emit()

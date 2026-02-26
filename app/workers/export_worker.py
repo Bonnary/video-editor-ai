@@ -50,16 +50,30 @@ class ExportWorker(QObject):
         self._output_video_path    = output_video_path
         self._original_volume      = original_volume
         self._mute_during_captions = mute_during_captions
+        self._cancelled            = False
+
+    def cancel(self) -> None:
+        """Request cancellation. The worker will stop at the next safe checkpoint."""
+        logger.info("ExportWorker cancel requested")
+        self._cancelled = True
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
         logger.info("ExportWorker starting — output=%s", self._output_video_path)
         try:
+            if self._cancelled:
+                logger.info("ExportWorker: cancelled before start")
+                return
+
             # 1. Write SRT
             srt_path = os.path.splitext(self._output_video_path)[0] + ".srt"
             logger.info("Writing SRT to %s", srt_path)
             write_srt(self._captions, srt_path, use_khmer=True)
             self.progress.emit(5)
+
+            if self._cancelled:
+                logger.info("ExportWorker: cancelled before ffmpeg")
+                return
 
             # 2. Render video
             logger.info("Running ffmpeg export (volume=%.2f, mute=%s)…",

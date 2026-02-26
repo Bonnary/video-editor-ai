@@ -47,7 +47,13 @@ class TranslateWorker(QObject):
 
     def __init__(self, captions: List[Caption]):
         super().__init__()
-        self._captions = captions
+        self._captions  = captions
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Request cancellation. The worker will stop at the next safe checkpoint."""
+        logger.info("TranslateWorker cancel requested")
+        self._cancelled = True
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
@@ -56,6 +62,9 @@ class TranslateWorker(QObject):
             total = len(self._captions) or 1
 
             for i, cap in enumerate(self._captions):
+                if self._cancelled:
+                    logger.info("TranslateWorker: cancelled at caption %d", i)
+                    return
                 translated = None
                 last_exc: Exception | None = None
 

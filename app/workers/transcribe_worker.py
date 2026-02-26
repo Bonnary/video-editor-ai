@@ -37,10 +37,17 @@ class TranscribeWorker(QObject):
     error          = Signal(str)
     finished       = Signal()
 
-    def __init__(self, video_path: str, model_name: str = "auto"):
+    def __init__(self, video_path: str, model_name: str = "auto", language: str = "zh"):
         super().__init__()
         self._video_path  = video_path
         self._model_name  = model_name
+        self._language    = language
+        self._cancelled   = False
+
+    def cancel(self) -> None:
+        """Request cancellation. The worker will stop at the next safe checkpoint."""
+        logger.info("TranscribeWorker cancel requested")
+        self._cancelled = True
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
@@ -54,10 +61,14 @@ class TranscribeWorker(QObject):
             logger.info("Whisper model loaded on device=%s", device)
             self.progress.emit(20)
 
+            if self._cancelled:
+                logger.info("TranscribeWorker: cancelled before transcription")
+                return
+
             logger.info("Transcribing audio track…")
             result = model.transcribe(
                 self._video_path,
-                language="zh",          # Chinese (Mandarin)
+                language=self._language,
                 verbose=False,
                 word_timestamps=False,
                 fp16=(device == "cuda"),
@@ -69,6 +80,9 @@ class TranscribeWorker(QObject):
             captions: List[Caption] = []
 
             for i, seg in enumerate(segments, start=1):
+                if self._cancelled:
+                    logger.info("TranscribeWorker: cancelled during segment processing")
+                    return
                 captions.append(
                     Caption(
                         index=i,

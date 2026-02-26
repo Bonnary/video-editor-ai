@@ -26,7 +26,7 @@ from app.widgets.caption_table import CaptionTable
 from app.widgets.loading_dialog import LoadingDialog
 from app.widgets.log_viewer import LogViewerDialog
 from app.widgets.video_player import VideoPlayer
-from app.workers.tts_worker import KHMER_VOICES, DEFAULT_VOICE
+from app.workers.tts_worker import DEFAULT_VOICE
 
 # Resolve logo path relative to this file
 _IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         self._video_path: Optional[str] = None
         self._tts_dir: Optional[str] = None     # temp dir for TTS audio files
         self._busy = False
+        self._was_cancelled = False
 
         # Active QThread/worker references (prevent GC)
         self._thread: Optional[QThread] = None
@@ -74,10 +75,20 @@ class MainWindow(QMainWindow):
         self.tts_btn        = QPushButton("🔊  Generate TTS")
         self.export_btn     = QPushButton("💾  Export")
 
-        self.voice_combo = QComboBox()
-        for label in KHMER_VOICES:
-            self.voice_combo.addItem(label, KHMER_VOICES[label])
-        voice_label = QLabel("  Voice: ")
+        # Transcription language selector
+        TRANSCRIPTION_LANGUAGES = [
+            ("Chinese (Mandarin)", "zh"),
+            ("English",           "en"),
+            ("Korean",            "ko"),
+            ("Japanese",          "ja"),
+        ]
+        self.lang_combo = QComboBox()
+        self.lang_combo.setFixedHeight(32)
+        for label, code in TRANSCRIPTION_LANGUAGES:
+            self.lang_combo.addItem(label, code)
+        # Default to Chinese
+        self.lang_combo.setCurrentIndex(0)
+        lang_label = QLabel("  Language: ")
 
         # Whisper model selector
         WHISPER_MODELS = [
@@ -103,13 +114,19 @@ class MainWindow(QMainWindow):
             btn.setFixedHeight(32)
             toolbar.addWidget(btn)
 
+        self.cancel_btn = QPushButton("\U0001f6ab  Cancel")
+        self.cancel_btn.setFixedHeight(32)
+        self.cancel_btn.setVisible(False)
+        toolbar.addSeparator()
+        toolbar.addWidget(self.cancel_btn)
+
         toolbar.addSeparator()
         toolbar.addWidget(model_label)
         toolbar.addWidget(self.model_combo)
 
         toolbar.addSeparator()
-        toolbar.addWidget(voice_label)
-        toolbar.addWidget(self.voice_combo)
+        toolbar.addWidget(lang_label)
+        toolbar.addWidget(self.lang_combo)
 
         # ---- Central splitter ----
         self.video_player   = VideoPlayer()
@@ -129,6 +146,7 @@ class MainWindow(QMainWindow):
         self.translate_btn.clicked.connect(self._on_translate_clicked)
         self.tts_btn.clicked.connect(self._on_tts_clicked)
         self.export_btn.clicked.connect(self._on_export_clicked)
+        self.cancel_btn.clicked.connect(self._on_cancel_clicked)
 
         self.caption_table.caption_selected.connect(self.video_player.seek_to)
 
@@ -231,8 +249,10 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(0)
         status = label if label else ("Ready." if not busy else "Working…")
         self._set_status(status)
-        self.voice_combo.setEnabled(not busy)
+        self.lang_combo.setEnabled(not busy)
         self.model_combo.setEnabled(not busy)
+        self.cancel_btn.setVisible(busy)
+        self.cancel_btn.setEnabled(busy)
         self._update_button_states()
 
     def _update_button_states(self) -> None:
@@ -254,6 +274,23 @@ class MainWindow(QMainWindow):
 
     def _show_error(self, msg: str) -> None:
         QMessageBox.critical(self, "Error", msg)
+
+    @Slot()
+    def _on_cancel_clicked(self) -> None:
+        """Stop the currently running background worker."""
+        self._was_cancelled = True
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("\U0001f6ab  Cancelling…")
+        self._set_status("Cancelling…")
+        if self._worker and hasattr(self._worker, "cancel"):
+            self._worker.cancel()
+
+    def _on_worker_finished(self, success_msg: str = "") -> None:
+        """Called when any background worker emits finished()."""
+        was_cancelled = self._was_cancelled
+        self._was_cancelled = False
+        self.cancel_btn.setText("\U0001f6ab  Cancel")
+        self._set_busy(False, "Cancelled." if was_cancelled else success_msg)
 
     def _start_worker(self, worker: QObject, thread: QThread) -> None:
         """Wire up and start a worker/thread pair."""
@@ -288,24 +325,27 @@ class MainWindow(QMainWindow):
         from app.workers.transcribe_worker import TranscribeWorker
 
         model_name = self.model_combo.currentData() or "auto"
+        language   = self.lang_combo.currentData() or "zh"
+        lang_label = self.lang_combo.currentText()
         self._set_busy(True, f"Transcribing audio with Whisper [{model_name}]  (this may take a while)…")
 
-        worker = TranscribeWorker(self._video_path, model_name=model_name)
+        worker = TranscribeWorker(self._video_path, model_name=model_name, language=language)
         thread = QThread(self)
 
         # Loading popup
         self._loading_dlg = LoadingDialog(
             self,
             title="Whisper Transcription",
-            message=f"Transcribing audio with Whisper…\nModel: {model_name}\nThis may take a while.",
+            message=f"Transcribing audio with Whisper…\nModel: {model_name}\nLanguage: {lang_label}\nThis may take a while.",
         )
         worker.progress.connect(self._loading_dlg.set_progress)
         worker.finished.connect(self._loading_dlg.close)
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
 
         worker.progress.connect(self.progress_bar.setValue)
         worker.captions_ready.connect(self._on_captions_ready)
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(lambda: self._set_busy(False))
+        worker.finished.connect(self._on_worker_finished)
 
         self._start_worker(worker, thread)
         self._loading_dlg.show()
@@ -323,11 +363,17 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_translate_finished(self) -> None:
+        was_cancelled = self._was_cancelled
+        self._was_cancelled = False
+        self.cancel_btn.setText("\U0001f6ab  Cancel")
         skipped = self._translate_skipped
-        msg = "Translation complete."
-        if skipped:
-            msg += f"  {skipped} caption(s) could not be translated and were skipped."
-        self._set_busy(False, msg)
+        if was_cancelled:
+            self._set_busy(False, "Cancelled.")
+        else:
+            msg = "Translation complete."
+            if skipped:
+                msg += f"  {skipped} caption(s) could not be translated and were skipped."
+            self._set_busy(False, msg)
         self._translate_skipped = 0
 
     @Slot()
@@ -345,6 +391,15 @@ class MainWindow(QMainWindow):
 
         self._translate_skipped = 0
 
+        self._loading_dlg = LoadingDialog(
+            self,
+            title="Translate to Khmer",
+            message=f"Translating {len(captions)} captions to Khmer…\nThis may take a while.",
+        )
+        worker.progress.connect(self._loading_dlg.set_progress)
+        worker.finished.connect(self._loading_dlg.close)
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
+
         worker.progress.connect(self.progress_bar.setValue)
         worker.caption_translated.connect(self.caption_table.update_khmer_text)
         worker.caption_skipped.connect(self._on_caption_skipped)
@@ -352,6 +407,7 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_translate_finished)
 
         self._start_worker(worker, thread)
+        self._loading_dlg.show()
 
     @Slot()
     def _on_tts_clicked(self) -> None:
@@ -359,7 +415,7 @@ class MainWindow(QMainWindow):
         if not captions:
             return
 
-        voice = self.voice_combo.currentData() or DEFAULT_VOICE
+        voice = DEFAULT_VOICE
 
         from app.workers.tts_worker import TTSWorker
 
@@ -368,12 +424,22 @@ class MainWindow(QMainWindow):
         worker = TTSWorker(captions, self._tts_dir, voice=voice)
         thread = QThread(self)
 
+        self._loading_dlg = LoadingDialog(
+            self,
+            title="Generate TTS",
+            message=f"Generating TTS audio for {len(captions)} captions…\nThis may take a while.",
+        )
+        worker.progress.connect(self._loading_dlg.set_progress)
+        worker.finished.connect(self._loading_dlg.close)
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
+
         worker.progress.connect(self.progress_bar.setValue)
         worker.caption_audio_ready.connect(self.caption_table.update_tts_path)
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(lambda: self._set_busy(False, "TTS generation complete."))
+        worker.finished.connect(lambda: self._on_worker_finished("TTS generation complete."))
 
         self._start_worker(worker, thread)
+        self._loading_dlg.show()
 
     @Slot()
     def _on_export_clicked(self) -> None:
@@ -412,11 +478,12 @@ class MainWindow(QMainWindow):
         )
         worker.progress.connect(self._loading_dlg.set_progress)
         worker.finished.connect(self._loading_dlg.close)
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
 
         worker.progress.connect(self.progress_bar.setValue)
         worker.done.connect(self._on_export_finished)
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(lambda: self._set_busy(False))
+        worker.finished.connect(self._on_worker_finished)
 
         self._start_worker(worker, thread)
         self._loading_dlg.show()

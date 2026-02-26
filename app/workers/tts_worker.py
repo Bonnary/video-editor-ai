@@ -48,6 +48,12 @@ class TTSWorker(QObject):
         self._captions   = captions
         self._output_dir = output_dir
         self._voice      = voice
+        self._cancelled  = False
+
+    def cancel(self) -> None:
+        """Request cancellation. The worker will stop at the next safe checkpoint."""
+        logger.info("TTSWorker cancel requested")
+        self._cancelled = True
 
     # ------------------------------------------------------------------ slot
     def run(self) -> None:
@@ -59,6 +65,9 @@ class TTSWorker(QObject):
             total = len(self._captions) or 1
 
             for i, cap in enumerate(self._captions):
+                if self._cancelled:
+                    logger.info("TTSWorker: cancelled at caption %d", i)
+                    return
                 if not cap.khmer_text:
                     self.progress.emit(int((i + 1) / total * 100))
                     continue
