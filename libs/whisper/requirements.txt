@@ -1,4 +1,12 @@
---extra-index-url https://download.pytorch.org/whl/cu121
+# CUDA build — Windows & Linux with NVIDIA GPU + CUDA Toolkit
+# To update the CUDA version, change only the URL below (keep in sync with pyproject.toml).
+# Latest index: https://download.pytorch.org/whl/cu126
+# Check for newer: https://pytorch.org/get-started/locally/
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+# macOS (Apple Silicon or Intel): remove the --extra-index-url line above so
+# pip fetches the default MPS-capable wheel from PyPI instead.
+
 openai-whisper
 setuptools-rust
 torch

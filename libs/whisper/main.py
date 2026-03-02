@@ -1,7 +1,94 @@
 import argparse
 import os
+import platform
+import subprocess
 import warnings
 warnings.filterwarnings("ignore")
+
+
+def _build_torch_runtime_error_message(exc: Exception) -> str:
+    """Return a user-friendly message for broken torch/CUDA runtime imports."""
+    exc_text = str(exc)
+    system = platform.system()
+
+    if system == "Linux":
+        return (
+            "PyTorch failed to load because CUDA runtime libraries are missing or mismatched "
+            f"({exc_text}).\n\n"
+            "Fix options:\n"
+            "1) Use NVIDIA GPU (Omarchy/Arch): install CUDA runtime\n"
+            "   sudo pacman -S nvidia-open opencl-nvidia cuda cudnn \n\n"
+            "2) Run on CPU only (recommended if you don't need GPU):\n"
+            "   uv pip uninstall -y torch torchvision torchaudio\n"
+            "   uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu\n\n"
+            "Then restart the app."
+        )
+
+    if system == "Windows":
+        return (
+            "PyTorch failed to load because CUDA runtime libraries are missing or mismatched "
+            f"({exc_text}).\n\n"
+            "Install the NVIDIA CUDA Toolkit, or reinstall CPU-only PyTorch, then restart the app."
+        )
+
+    return (
+        "PyTorch failed to load because CUDA runtime libraries are missing or mismatched "
+        f"({exc_text}).\n\n"
+        "Install compatible CUDA runtime libraries, or reinstall CPU-only PyTorch, then restart the app."
+    )
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA / CUDA helpers
+# ---------------------------------------------------------------------------
+
+def _detect_nvidia_gpu() -> tuple[bool, str]:
+    """
+    Probe nvidia-smi to confirm an NVIDIA GPU is physically present.
+    Returns (has_gpu: bool, info_string: str).
+    Works on Windows, Linux, and macOS (via Rosetta / Boot Camp).
+    """
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+            return bool(lines), lines[0] if lines else "Unknown NVIDIA GPU"
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return False, ""
+
+
+def _cuda_runtime_present() -> bool:
+    """
+    Check whether the CUDA runtime shared libraries are actually loadable
+    WITHOUT touching torch.cuda (which would print the ugly C-level error).
+
+    Uses ctypes.util.find_library so it respects ldconfig / LD_LIBRARY_PATH
+    on Linux and the DLL search path on Windows.
+    """
+    import ctypes
+    import ctypes.util
+
+    system = platform.system()
+
+    if system == "Linux":
+        # libcublas.so.* is the minimum we need; if ldconfig can't find it,
+        # torch.cuda will fail with the "not found in system path" message.
+        return ctypes.util.find_library("cublas") is not None
+
+    if system == "Windows":
+        # On Windows CUDA ships as cublas64_XX.dll in the CUDA Toolkit bin dir.
+        for name in ("cublas64_12", "cublas64_11", "cublas64_10"):
+            if ctypes.util.find_library(name):
+                return True
+        return False
+
+    # macOS with CUDA (extremely rare — Boot Camp only)
+    return ctypes.util.find_library("cublas") is not None
+
 
 def format_timestamp(seconds: float) -> str:
     """Convert seconds to SRT timestamp format: HH:MM:SS,mmm"""
@@ -38,54 +125,125 @@ def auto_select_model(vram_gb: float) -> str:
 
 def load_model(model_name: str = "auto"):
     """
-    Load a Whisper model onto the best available device (CUDA or CPU).
-    If model_name is 'auto', selects the best model based on available VRAM.
+    Load a Whisper model on the best available compute device.
 
-    Model options and VRAM usage:
-        tiny    ~1 GB   - fastest, least accurate
-        base    ~1 GB   - fast, decent accuracy
-        small   ~2 GB   - good balance
-        medium  ~5 GB   - great accuracy
-        large   ~10 GB  - best accuracy
-        auto            - automatically pick best model for your GPU (default)
+    Device priority:
+        1. CUDA  — NVIDIA GPU on Windows / Linux
+        2. MPS   — Apple Silicon GPU (Metal Performance Shaders)
+        3. CPU   — fallback on any platform
+
+    If an NVIDIA GPU is present but the CUDA runtime is missing, a
+    RuntimeError is raised with platform-specific installation instructions
+    instead of silently falling back to CPU.
+
+    model_name:
+        tiny   ~1 GB VRAM    fastest, least accurate
+        base   ~1 GB VRAM    fast, decent accuracy
+        small  ~2 GB VRAM    good balance
+        medium ~5 GB VRAM    great accuracy
+        large  ~10 GB VRAM   best accuracy
+        auto               auto-select based on available memory (default)
 
     Returns:
-        model:  loaded Whisper model
-        device: device string ("cuda" or "cpu")
+        (model, device_str) — device_str is "cuda", "mps", or "cpu"
     """
-    import torch
+    try:
+        import torch
+    except Exception as exc:  # pragma: no cover - environment-specific
+        raise RuntimeError(_build_torch_runtime_error_message(exc)) from exc
+
     import whisper
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    system  = platform.system()   # "Windows" | "Linux" | "Darwin"
+    machine = platform.machine()  # "x86_64" | "AMD64" | "arm64" | "aarch64"
 
+    device = "cpu"  # default; overridden below
+
+    # ------------------------------------------------------------------ MPS
+    # Apple Silicon (M-series chips): use Metal Performance Shaders.
+    if system == "Darwin" and machine in ("arm64", "aarch64"):
+        try:
+            if torch.backends.mps.is_available():
+                device = "mps"
+                print("✅ Apple Silicon detected — using MPS (Metal Performance Shaders)")
+            else:
+                print("⚠️  MPS unavailable on this Mac — falling back to CPU")
+        except Exception as mps_err:
+            print(f"⚠️  MPS check failed ({mps_err}) — falling back to CPU")
+
+    # ------------------------------------------------------------------ CUDA
+    # Check order (each step only runs if the previous one passed):
+    #   1. Is an NVIDIA GPU physically present?     → nvidia-smi
+    #   2. Are the CUDA runtime libs loadable?      → ctypes (no torch.cuda touch)
+    #   3. Does torch.cuda confirm the device?      → torch.cuda.is_available()
+    #
+    # Step 2 ensures torch.cuda is NEVER called when the runtime is absent,
+    # which prevents the C-level "libcublas.so not found" message from printing.
+    # The user has already been warned about missing CUDA at startup, so here
+    # we simply fall back to CPU without raising.
+    else:
+        has_nvidia, _ = _detect_nvidia_gpu()
+
+        if not has_nvidia:
+            print("ℹ️  No NVIDIA GPU detected — using CPU")
+
+        elif not _cuda_runtime_present():
+            # CUDA not installed — user was already warned at startup.
+            print("ℹ️  CUDA runtime not found — using CPU")
+
+        else:
+            # Both GPU and CUDA runtime confirmed — safe to call torch.cuda.
+            try:
+                if torch.cuda.is_available():
+                    device = "cuda"
+                else:
+                    print(
+                        "⚠️  NVIDIA GPU and CUDA libs found but torch.cuda.is_available() "
+                        "returned False (possible driver/torch version mismatch). "
+                        "Falling back to CPU."
+                    )
+            except Exception as exc:
+                print(f"⚠️  torch.cuda check error ({exc}). Falling back to CPU.")
+
+    # ------------------------------------------------------------------ VRAM / model selection
     if device == "cuda":
         gpu_name = torch.cuda.get_device_name(0)
         vram_gb  = torch.cuda.get_device_properties(0).total_memory / 1e9
-        print(f"✅ GPU detected: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+        print(f"✅ GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)  |  "
+              f"CUDA {torch.version.cuda}")
 
         if model_name == "auto":
             model_name = auto_select_model(vram_gb)
-            print(f"🤖 Auto-selected model: '{model_name}' (fits in {vram_gb * 0.8:.1f} GB usable VRAM)")
+            print(f"🤖 Auto-selected model: '{model_name}' "
+                  f"(fits in {vram_gb * 0.8:.1f} GB usable VRAM)")
         else:
             required = MODEL_VRAM_REQUIREMENTS.get(model_name, 0)
             usable   = vram_gb * 0.80
             if required > usable:
                 suggested = auto_select_model(vram_gb)
-                print(f"⚠️  '{model_name}' needs ~{required} GB but only {usable:.1f} GB usable VRAM available.")
-                print(f"   Switching to '{suggested}' to avoid OOM errors.")
+                print(f"⚠️  '{model_name}' needs ~{required} GB but only "
+                      f"{usable:.1f} GB usable. Switching to '{suggested}'.")
                 model_name = suggested
             else:
-                print(f"✅ Using manually selected model: '{model_name}' (~{required} GB VRAM)")
-    else:
-        print("⚠️  CUDA not available — using CPU (slower)")
+                print(f"✅ Model: '{model_name}' (~{required} GB VRAM)")
+
+    elif device == "mps":
+        # MPS has no reliable public VRAM query — default to "small" for safety.
         if model_name == "auto":
-            # On CPU, default to small to keep things manageable
+            model_name = "small"
+            print(f"🤖 Auto-selected model for Apple Silicon: '{model_name}'")
+        else:
+            print(f"✅ Model: '{model_name}' (Apple Silicon MPS)")
+
+    else:  # cpu
+        if model_name == "auto":
             model_name = "small"
             print(f"🤖 Auto-selected model for CPU: '{model_name}'")
         elif model_name == "large":
-            print("⚠️  'large' on CPU will be very slow. Consider using 'medium' or 'small'.")
+            print("⚠️  'large' on CPU will be very slow. "
+                  "Consider 'medium' or 'small'.")
 
-    print(f"📦 Loading Whisper model: '{model_name}'...")
+    print(f"📦 Loading Whisper model: '{model_name}'…")
     model = whisper.load_model(model_name, device=device)
     return model, device
 
@@ -99,7 +257,7 @@ def transcribe_to_srt(input_file: str, output_file: str, model_name: str = "auto
         input_file,
         verbose=True,
         word_timestamps=False,
-        fp16=(device == "cuda")
+        fp16=(device == "cuda"),  # fp16 only on CUDA; MPS/CPU use fp32
     )
 
     print(f"💾 Writing SRT to: {output_file}")

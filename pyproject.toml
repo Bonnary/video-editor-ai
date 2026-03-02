@@ -6,30 +6,41 @@ dependencies = [
     "googletrans==4.0.0-rc1",
     "openai-whisper",         # speech‑to‑text model
     "setuptools-rust",        # build support for Rust extensions
-    "torch",                  # PyTorch core (CUDA 12.6 build — see [tool.uv.sources])
+    "torch",                  # PyTorch core (CUDA build on Win/Linux; MPS-capable build on macOS — see [tool.uv.sources])
     "torchvision",            # computer vision utilities
     "torchaudio",             # audio processing utilities
     "edge-tts",               # Khmer TTS (Microsoft Edge Neural voices)
     "pyside6",                # Qt6 UI framework
     "ffmpeg-python",          # FFmpeg Python bindings for export
-    "pyinstaller"
+    "pyinstaller",
 ]
 
-# -------------------\--------------------------------------------------------
-# uv: pin torch/torchvision/torchaudio to the CUDA 12.6 PyTorch index so
-# that `uv sync` installs GPU-enabled wheels instead of the default CPU build.
-# Change the index name/url below if you use a different CUDA version:
-#   CUDA 11.8 → https://download.pytorch.org/whl/cu118
-#   CUDA 12.1 → https://download.pytorch.org/whl/cu121
-#   CUDA 12.4 → https://download.pytorch.org/whl/cu124
-#   CUDA 12.6 → https://download.pytorch.org/whl/cu126  (current)
+# ---------------------------------------------------------------------------
+# uv: platform-aware torch wheel selection.
+#
+#   Windows / Linux  → CUDA build   (NVIDIA GPU + CUDA Toolkit required)
+#   macOS (any arch) → standard PyPI build  (includes MPS for Apple Silicon)
+#
+# CUDA version: we track the latest stable PyTorch CUDA index.
+# When a new PyTorch release adds a newer CUDA build (e.g. cu128, cu130…)
+# update ONLY the index URL below — no other changes are needed.
+#
+# Check for the latest at: https://pytorch.org/get-started/locally/
+# Current latest: CUDA 12.6  →  https://download.pytorch.org/whl/cu126
 # ---------------------------------------------------------------------------
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
+torch = [
+    { index = "pytorch-cuda", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cuda", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cuda", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
+# ↓ Update this URL when a newer CUDA build is available.
+name = "pytorch-cuda"
 url = "https://download.pytorch.org/whl/cu126"
 explicit = true

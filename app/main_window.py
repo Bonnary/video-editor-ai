@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.caption import Caption
+from app.utils.srt_utils import parse_srt
 from app.widgets.caption_table import CaptionTable
 from app.widgets.loading_dialog import LoadingDialog
 from app.widgets.log_viewer import LogViewerDialog
@@ -50,6 +51,8 @@ class MainWindow(QMainWindow):
         self._tts_dir: Optional[str] = None     # temp dir for TTS audio files
         self._busy = False
         self._was_cancelled = False
+        self._pipeline_running = False  # True while "Run All" chain is active
+        self._translate_skipped = 0
 
         # Active QThread/worker references (prevent GC)
         self._thread: Optional[QThread] = None
@@ -69,11 +72,13 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
 
-        self.load_btn       = QPushButton("📂  Load Video")
-        self.transcribe_btn = QPushButton("🎙️  Transcribe")
-        self.translate_btn  = QPushButton("🌐  Translate → Khmer")
-        self.tts_btn        = QPushButton("🔊  Generate TTS")
-        self.export_btn     = QPushButton("💾  Export")
+        self.load_btn        = QPushButton("📂  Load Video")
+        self.import_srt_btn  = QPushButton("📄  Import SRT")
+        self.transcribe_btn  = QPushButton("🎙️  Transcribe")
+        self.translate_btn   = QPushButton("🌐  Translate → Khmer")
+        self.tts_btn         = QPushButton("🔊  Generate TTS")
+        self.run_all_btn     = QPushButton("🚀  Run All")
+        self.export_btn      = QPushButton("💾  Export")
 
         # Transcription language selector
         TRANSCRIPTION_LANGUAGES = [
@@ -112,10 +117,19 @@ class MainWindow(QMainWindow):
         self.model_combo.setCurrentIndex(len(WHISPER_MODELS) - 1)
         model_label = QLabel("  Whisper model: ")
 
-        for btn in (self.load_btn, self.transcribe_btn, self.translate_btn,
-                    self.tts_btn, self.export_btn):
+        for btn in (self.load_btn, self.import_srt_btn, self.transcribe_btn,
+                    self.translate_btn, self.tts_btn, self.run_all_btn,
+                    self.export_btn):
             btn.setFixedHeight(32)
             toolbar.addWidget(btn)
+
+        # Tooltip hints
+        self.import_srt_btn.setToolTip(
+            "Import an existing .srt file as captions (skips Transcription & Translation)"
+        )
+        self.run_all_btn.setToolTip(
+            "Run Transcribe → Translate → Generate TTS in one click"
+        )
 
         self.cancel_btn = QPushButton("\U0001f6ab  Cancel")
         self.cancel_btn.setFixedHeight(32)
@@ -145,9 +159,11 @@ class MainWindow(QMainWindow):
 
         # ---- Connect signals ----
         self.load_btn.clicked.connect(self._on_load_clicked)
+        self.import_srt_btn.clicked.connect(self._on_import_srt_clicked)
         self.transcribe_btn.clicked.connect(self._on_transcribe_clicked)
         self.translate_btn.clicked.connect(self._on_translate_clicked)
         self.tts_btn.clicked.connect(self._on_tts_clicked)
+        self.run_all_btn.clicked.connect(self._on_run_all_clicked)
         self.export_btn.clicked.connect(self._on_export_clicked)
         self.cancel_btn.clicked.connect(self._on_cancel_clicked)
 
@@ -261,8 +277,9 @@ class MainWindow(QMainWindow):
     def _update_button_states(self) -> None:
         if self._busy:
             # Disable everything while a background job is running
-            for btn in (self.load_btn, self.transcribe_btn, self.translate_btn,
-                        self.tts_btn, self.export_btn):
+            for btn in (self.load_btn, self.import_srt_btn, self.transcribe_btn,
+                        self.translate_btn, self.tts_btn, self.run_all_btn,
+                        self.export_btn):
                 btn.setEnabled(False)
             return
 
@@ -270,9 +287,11 @@ class MainWindow(QMainWindow):
         has_captions = bool(self.caption_table.get_captions())
 
         self.load_btn.setEnabled(True)
+        self.import_srt_btn.setEnabled(has_video)
         self.transcribe_btn.setEnabled(has_video)
         self.translate_btn.setEnabled(has_captions)
         self.tts_btn.setEnabled(has_captions)
+        self.run_all_btn.setEnabled(has_video)
         self.export_btn.setEnabled(has_captions)
 
     def _show_error(self, msg: str) -> None:
@@ -280,8 +299,9 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_cancel_clicked(self) -> None:
-        """Stop the currently running background worker."""
+        """Stop the currently running background worker (and any active pipeline)."""
         self._was_cancelled = True
+        self._pipeline_running = False   # abort Run-All chain
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setText("\U0001f6ab  Cancelling…")
         self._set_status("Cancelling…")
@@ -321,6 +341,49 @@ class MainWindow(QMainWindow):
             self._load_video(path)
 
     @Slot()
+    def _on_import_srt_clicked(self) -> None:
+        """Import an .srt file and load its contents as captions (skips transcription & translation)."""
+        if not self._video_path:
+            self._show_error("Please load a video first before importing an SRT file.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import SRT File", "",
+            "SRT Subtitle Files (*.srt);;All Files (*)"
+        )
+        if not path:
+            return
+        try:
+            import logging as _log
+            logger = _log.getLogger(__name__)
+            raw_captions = parse_srt(path)
+            if not raw_captions:
+                self._show_error("No captions found in the selected SRT file.")
+                return
+            # The exported SRT stores Khmer text; treat the parsed text as khmer_text
+            # so TTS and export work without needing to re-translate.
+            for cap in raw_captions:
+                cap.khmer_text = cap.original_text
+            self.caption_table.load_captions(raw_captions)
+            self._set_status(
+                f"Imported {len(raw_captions)} caption(s) from "
+                f"{os.path.basename(path)} — ready for TTS / Export."
+            )
+            logger.info("Imported SRT: %s  (%d captions)", path, len(raw_captions))
+            self._update_button_states()
+        except Exception as exc:
+            self._show_error(f"Failed to import SRT:\n{exc}")
+
+    @Slot()
+    def _on_run_all_clicked(self) -> None:
+        """Run Transcribe → Translate → Generate TTS in sequence."""
+        if not self._video_path:
+            return
+        if self._busy:
+            return
+        self._pipeline_running = True
+        self._on_transcribe_clicked()
+
+    @Slot()
     def _on_transcribe_clicked(self) -> None:
         if not self._video_path:
             return
@@ -358,6 +421,9 @@ class MainWindow(QMainWindow):
         self.caption_table.load_captions(captions)
         self._set_status(f"Transcription complete — {len(captions)} segments.")
         self._update_button_states()
+        if self._pipeline_running:
+            # Chain: transcription done → start translation
+            self._on_translate_clicked()
 
     @Slot(int)
     def _on_caption_skipped(self, index: int) -> None:
@@ -370,14 +436,23 @@ class MainWindow(QMainWindow):
         self._was_cancelled = False
         self.cancel_btn.setText("\U0001f6ab  Cancel")
         skipped = self._translate_skipped
+        self._translate_skipped = 0
         if was_cancelled:
+            self._pipeline_running = False
             self._set_busy(False, "Cancelled.")
+        elif self._pipeline_running:
+            # Chain: translation done → start TTS
+            msg = "Translation complete."
+            if skipped:
+                msg += f"  {skipped} caption(s) skipped."
+            self._set_status(msg)
+            self._set_busy(False)
+            self._on_tts_clicked()
         else:
             msg = "Translation complete."
             if skipped:
                 msg += f"  {skipped} caption(s) could not be translated and were skipped."
             self._set_busy(False, msg)
-        self._translate_skipped = 0
 
     @Slot()
     def _on_translate_clicked(self) -> None:
@@ -439,7 +514,7 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self.progress_bar.setValue)
         worker.caption_audio_ready.connect(self.caption_table.update_tts_path)
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(lambda: self._on_worker_finished("TTS generation complete."))
+        worker.finished.connect(self._on_tts_finished)
 
         self._start_worker(worker, thread)
         self._loading_dlg.show()
@@ -500,8 +575,16 @@ class MainWindow(QMainWindow):
             f"Video saved to:\n{output_path}\n\nSRT saved to:\n{srt_path}"
         )
 
+    @Slot()
+    def _on_tts_finished(self) -> None:
+        pipeline_was_running = self._pipeline_running
+        self._pipeline_running = False
+        msg = "Run All complete — ready to export." if pipeline_was_running else "TTS generation complete."
+        self._on_worker_finished(msg)
+
     @Slot(str)
     def _on_worker_error(self, message: str) -> None:
+        self._pipeline_running = False   # abort Run-All chain on any error
         self._set_busy(False)
         self._show_error(message)
 
