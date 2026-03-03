@@ -17,7 +17,7 @@ def _build_torch_runtime_error_message(exc: Exception) -> str:
             f"({exc_text}).\n\n"
             "Fix options:\n"
             "1) Use NVIDIA GPU (Omarchy/Arch): install CUDA runtime\n"
-            "   sudo pacman -S nvidia-open opencl-nvidia cuda cudnn \n\n"
+            "   sudo pacman -S nvidia-open opencl-nvidia cuda cudnn libxcrypt-compat \n\n"
             "2) Run on CPU only (recommended if you don't need GPU):\n"
             "   uv pip uninstall -y torch torchvision torchaudio\n"
             "   uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu\n\n"

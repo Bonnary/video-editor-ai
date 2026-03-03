@@ -48,7 +48,6 @@ logging.getLogger().addHandler(_get_qt_log_handler())
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 from app.main_window import MainWindow
-from app.utils.gpu_check import check_gpu_at_startup
 
 
 def main() -> None:
@@ -63,10 +62,6 @@ def main() -> None:
 
     window = MainWindow()
     window.show()
-
-    # Warn the user if an NVIDIA GPU is present but CUDA is not installed.
-    # Runs after show() so the main window is visible behind the dialog.
-    check_gpu_at_startup(parent=window)
 
     sys.exit(app.exec())
 
