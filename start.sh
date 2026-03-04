@@ -64,10 +64,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "Verifying virtual environment..."
 if [[ ! -f "$SCRIPT_DIR/.venv/bin/activate" ]]; then
     echo "Virtual environment not found. Running uv sync to create it..."
-    uv sync
 else
-    echo "Virtual environment already exists."
+    echo "Virtual environment already exists. Syncing dependencies..."
 fi
+uv sync
 
 # ── run ───────────────────────────────────────────────────────────────────────
 echo "Activating virtual environment..."
