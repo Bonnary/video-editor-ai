@@ -46,6 +46,71 @@ def get_video_info(video_path: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+#  Safe async runner (avoids WinError 206 on long filter graphs)
+# --------------------------------------------------------------------------- #
+
+# Windows CreateProcess limit is 32 767 chars.  Use a conservative threshold
+# so there is always headroom for the rest of the command line.
+_WIN_CMDLINE_THRESHOLD = 8_000
+
+
+def _run_ffmpeg_node_async(
+    node,
+    pipe_stderr: bool = True,
+) -> tuple["subprocess.Popen", "str | None"]:
+    """
+    Compile an ffmpeg-python node and launch it as an async subprocess.
+
+    On Windows the ``CreateProcess`` API has a ~32 767-character command-line
+    limit.  When a large filter graph (e.g. hundreds of chained volume filters)
+    would exceed that limit the function writes the ``-filter_complex`` value
+    to a temporary file and substitutes it with ``-filter_complex_script``,
+    keeping the command line short.
+
+    Returns
+    -------
+    (process, tmp_script_path)
+        *tmp_script_path* is the path of the temp file when the script trick
+        was used, or ``None`` otherwise.  The caller is responsible for
+        deleting the file after the process finishes.
+    """
+    cmd = ffmpeg.compile(node)
+
+    # Estimate the final command-line length using Windows quoting rules.
+    cmd_len = len(subprocess.list2cmdline(cmd))
+    tmp_script: str | None = None
+
+    if cmd_len > _WIN_CMDLINE_THRESHOLD:
+        log.debug(
+            "[ffmpeg] command line is %d chars – switching to -filter_complex_script",
+            cmd_len,
+        )
+        new_cmd: list[str] = []
+        i = 0
+        while i < len(cmd):
+            if cmd[i] == "-filter_complex" and i + 1 < len(cmd):
+                tmp_fd, tmp_script = tempfile.mkstemp(suffix="_fc.txt")
+                try:
+                    with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
+                        fh.write(cmd[i + 1])
+                except Exception:
+                    os.close(tmp_fd)
+                    raise
+                new_cmd.extend(["-filter_complex_script", tmp_script])
+                i += 2
+            else:
+                new_cmd.append(cmd[i])
+                i += 1
+        cmd = new_cmd
+
+    kwargs: dict = {}
+    if pipe_stderr:
+        kwargs["stderr"] = subprocess.PIPE
+    process = subprocess.Popen(cmd, **kwargs)
+    return process, tmp_script
+
+
+# --------------------------------------------------------------------------- #
 #  GPU / codec detection
 # --------------------------------------------------------------------------- #
 
@@ -100,40 +165,13 @@ def _build_atempo_chain(audio_node, speed: float):
     return node
 
 
-def _pre_mix_tts_audio(
-    captions: List[Caption],
+def _run_ffmpeg_mix_batch(
+    audio_streams: list,
     duration: float,
-    tmp_path: str,
-) -> bool:
-    """
-    Pre-mix all TTS clips into a single PCM WAV file at *tmp_path*.
-
-    Doing this in a separate fast pass reduces the main export command from
-    having N+1 amix inputs (one per caption) down to just 2 inputs, which
-    dramatically speeds up the final render.
-
-    Returns True if at least one TTS clip was processed, False otherwise.
-    """
-    audio_streams = []
-
-    for cap in captions:
-        if not cap.tts_audio_path or not os.path.exists(cap.tts_audio_path):
-            continue
-
-        tts_node = ffmpeg.input(cap.tts_audio_path).audio
-        tts_node = _build_atempo_chain(tts_node, cap.speed)
-
-        delay_ms = int(cap.effective_start * 1000)
-        if delay_ms > 0:
-            tts_node = tts_node.filter("adelay", f"{delay_ms}|{delay_ms}")
-
-        # apad so all clips share the same timeline before amix
-        tts_node = tts_node.filter("apad")
-        audio_streams.append(tts_node)
-
-    if not audio_streams:
-        return False
-
+    output_path: str,
+    label: str = "batch",
+) -> None:
+    """Mix *audio_streams* (already built ffmpeg-python nodes) into *output_path*."""
     if len(audio_streams) == 1:
         combined = audio_streams[0]
     else:
@@ -144,25 +182,106 @@ def _pre_mix_tts_audio(
             duration="longest",
             normalize=0,
         )
-
-    # Trim to video length so the intermediate file doesn't balloon
     combined = combined.filter("atrim", duration=duration)
-
     out_node = (
         ffmpeg
-        .output(combined, tmp_path, acodec="pcm_s16le", ar=44100, threads=0)
+        .output(combined, output_path, acodec="pcm_s16le", ar=44100, threads=0)
         .overwrite_output()
     )
-    log.debug("[ffmpeg pre-mix] command: %s", " ".join(ffmpeg.compile(out_node)))
+    log.debug("[ffmpeg %s] command: %s", label, " ".join(ffmpeg.compile(out_node)))
+    process, tmp_fc = _run_ffmpeg_node_async(out_node, pipe_stderr=True)
+    try:
+        for line in process.stderr:
+            text = line.decode("utf-8", errors="ignore").rstrip()
+            if text:
+                log.debug("[ffmpeg %s] %s", label, text)
+        process.wait()
+    finally:
+        if tmp_fc and os.path.exists(tmp_fc):
+            try:
+                os.remove(tmp_fc)
+            except OSError:
+                pass
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg {label} exited with code {process.returncode}"
+        )
 
-    process = out_node.run_async(pipe_stderr=True)
-    for line in process.stderr:
-        text = line.decode("utf-8", errors="ignore").rstrip()
-        if text:
-            log.debug("[ffmpeg pre-mix] %s", text)
-    process.wait()
-    if process.returncode and process.returncode != 0:
-        raise RuntimeError(f"ffmpeg pre-mix exited with code {process.returncode}")
+
+# Each batch of TTS clips is kept below this many inputs so the ffmpeg
+# command line stays well within the Windows 32 767-char CreateProcess limit.
+_TTS_BATCH_SIZE = 30
+
+
+def _pre_mix_tts_audio(
+    captions: List[Caption],
+    duration: float,
+    tmp_path: str,
+) -> bool:
+    """
+    Pre-mix all TTS clips into a single PCM WAV file at *tmp_path*.
+
+    With hundreds of captions each TTS clip is its own ``-i`` input, which
+    can push the ffmpeg command line past Windows' CreateProcess limit even
+    after extracting ``-filter_complex`` to a script.  To avoid this the
+    clips are processed in batches of ``_TTS_BATCH_SIZE``.  Each batch is
+    mixed to a temporary WAV, then all batch WAVs are reduced to the final
+    output file.
+
+    Returns True if at least one TTS clip was processed, False otherwise.
+    """
+    # ---- Build per-caption streams ----------------------------------------
+    tts_entries: list[tuple[float, object]] = []  # (effective_start, node)
+    for cap in captions:
+        if not cap.tts_audio_path or not os.path.exists(cap.tts_audio_path):
+            continue
+        tts_node = ffmpeg.input(cap.tts_audio_path).audio
+        tts_node = _build_atempo_chain(tts_node, cap.speed)
+        delay_ms = int(cap.effective_start * 1000)
+        if delay_ms > 0:
+            tts_node = tts_node.filter("adelay", f"{delay_ms}|{delay_ms}")
+        tts_node = tts_node.filter("apad")
+        tts_entries.append((cap.effective_start, tts_node))
+
+    if not tts_entries:
+        return False
+
+    streams = [node for _, node in tts_entries]
+
+    # ---- Fast path: few enough clips to do in a single pass ---------------
+    if len(streams) <= _TTS_BATCH_SIZE:
+        _run_ffmpeg_mix_batch(streams, duration, tmp_path, label="pre-mix")
+        return True
+
+    # ---- Batched path: mix in chunks, then merge batch WAVs ---------------
+    batch_files: list[str] = []
+    try:
+        for batch_start in range(0, len(streams), _TTS_BATCH_SIZE):
+            batch = streams[batch_start: batch_start + _TTS_BATCH_SIZE]
+            tmp_fd, batch_path = tempfile.mkstemp(suffix=f"_tts_batch_{len(batch_files)}.wav")
+            os.close(tmp_fd)
+            batch_files.append(batch_path)
+            log.debug(
+                "[ffmpeg pre-mix] batch %d/%d (%d clips)",
+                len(batch_files),
+                (len(streams) + _TTS_BATCH_SIZE - 1) // _TTS_BATCH_SIZE,
+                len(batch),
+            )
+            _run_ffmpeg_mix_batch(
+                batch, duration, batch_path,
+                label=f"pre-mix batch {len(batch_files)}",
+            )
+
+        # Merge all batch WAVs into the final output
+        merge_streams = [ffmpeg.input(p).audio for p in batch_files]
+        _run_ffmpeg_mix_batch(merge_streams, duration, tmp_path, label="pre-mix merge")
+    finally:
+        for p in batch_files:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
     return True
 
 
@@ -306,8 +425,9 @@ def export_video(
     # ------------------------------------------------------------------ #
     #  Run with progress tracking via stderr                              #
     # ------------------------------------------------------------------ #
+    tmp_fc: str | None = None
     try:
-        process = out.run_async(pipe_stderr=True)
+        process, tmp_fc = _run_ffmpeg_node_async(out, pipe_stderr=True)
         # Weight this phase as 30–100 % of total
         base_pct = 30 if has_tts else 5
         span_pct = 100 - base_pct
@@ -338,6 +458,12 @@ def export_video(
             progress_callback(100)
         log.info("[ffmpeg export] finished → %s", output_video_path)
     finally:
+        # Clean up temporary filter-complex script (if used)
+        if tmp_fc and os.path.exists(tmp_fc):
+            try:
+                os.remove(tmp_fc)
+            except OSError:
+                pass
         # Clean up temporary TTS mix file
         if tmp_tts_path and os.path.exists(tmp_tts_path):
             try:
