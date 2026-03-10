@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(toolbar)
 
         self.load_btn        = QPushButton("📂  Load Video")
+        self.batch_folder_btn = QPushButton("📁  Batch Folder")
         self.import_srt_btn  = QPushButton("📄  Import SRT")
         self.transcribe_btn  = QPushButton("🎙️  Transcribe")
         self.translate_btn   = QPushButton("🌐  Translate → Khmer")
@@ -117,13 +118,17 @@ class MainWindow(QMainWindow):
         self.model_combo.setCurrentIndex(len(WHISPER_MODELS) - 1)
         model_label = QLabel("  Whisper model: ")
 
-        for btn in (self.load_btn, self.import_srt_btn, self.transcribe_btn,
-                    self.translate_btn, self.tts_btn, self.run_all_btn,
-                    self.export_btn):
+        for btn in (self.load_btn, self.batch_folder_btn, self.import_srt_btn,
+                    self.transcribe_btn, self.translate_btn, self.tts_btn,
+                    self.run_all_btn, self.export_btn):
             btn.setFixedHeight(32)
             toolbar.addWidget(btn)
 
         # Tooltip hints
+        self.batch_folder_btn.setToolTip(
+            "Select an input folder of videos and an output folder, then run the full\n"
+            "pipeline (Transcribe → Translate → TTS → Export) on every video automatically."
+        )
         self.import_srt_btn.setToolTip(
             "Import an existing .srt file as captions (skips Transcription & Translation)"
         )
@@ -159,6 +164,7 @@ class MainWindow(QMainWindow):
 
         # ---- Connect signals ----
         self.load_btn.clicked.connect(self._on_load_clicked)
+        self.batch_folder_btn.clicked.connect(self._on_load_folder_clicked)
         self.import_srt_btn.clicked.connect(self._on_import_srt_clicked)
         self.transcribe_btn.clicked.connect(self._on_transcribe_clicked)
         self.translate_btn.clicked.connect(self._on_translate_clicked)
@@ -277,9 +283,9 @@ class MainWindow(QMainWindow):
     def _update_button_states(self) -> None:
         if self._busy:
             # Disable everything while a background job is running
-            for btn in (self.load_btn, self.import_srt_btn, self.transcribe_btn,
-                        self.translate_btn, self.tts_btn, self.run_all_btn,
-                        self.export_btn):
+            for btn in (self.load_btn, self.batch_folder_btn, self.import_srt_btn,
+                        self.transcribe_btn, self.translate_btn, self.tts_btn,
+                        self.run_all_btn, self.export_btn):
                 btn.setEnabled(False)
             return
 
@@ -287,6 +293,7 @@ class MainWindow(QMainWindow):
         has_captions = bool(self.caption_table.get_captions())
 
         self.load_btn.setEnabled(True)
+        self.batch_folder_btn.setEnabled(True)
         self.import_srt_btn.setEnabled(has_video)
         self.transcribe_btn.setEnabled(has_video)
         self.translate_btn.setEnabled(has_captions)
@@ -339,6 +346,138 @@ class MainWindow(QMainWindow):
         )
         if path:
             self._load_video(path)
+
+    @Slot()
+    def _on_load_folder_clicked(self) -> None:
+        """Pick an input folder and output folder, then start batch processing."""
+        from app.workers.batch_worker import collect_videos, BatchWorker
+
+        # 1. Select input folder
+        input_dir = QFileDialog.getExistingDirectory(
+            self, "Select Input Folder (videos)", ""
+        )
+        if not input_dir:
+            return
+
+        video_paths = collect_videos(input_dir)
+        if not video_paths:
+            QMessageBox.warning(
+                self, "No Videos Found",
+                f"No supported video files found in:\n{input_dir}\n\n"
+                "Supported formats: mp4, mkv, avi, mov, webm, flv, wmv"
+            )
+            return
+
+        # 2. Select output folder
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", input_dir
+        )
+        if not output_dir:
+            return
+
+        # 3. Confirm
+        msg = (
+            f"Found {len(video_paths)} video(s) in:\n{input_dir}\n\n"
+            f"Output folder:\n{output_dir}\n\n"
+            "The full pipeline (Transcribe → Translate → TTS → Export) will run "
+            "automatically for each video.\n\n"
+            "Continue?"
+        )
+        reply = QMessageBox.question(
+            self, "Start Batch Processing", msg,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 4. Start batch worker
+        model_name = self.model_combo.currentData() or "auto"
+        language   = self.lang_combo.currentData() or "zh"
+
+        self._set_busy(True, f"Batch: 0 / {len(video_paths)} — Loading model…")
+
+        worker = BatchWorker(
+            video_paths=video_paths,
+            output_dir=output_dir,
+            model_name=model_name,
+            language=language,
+        )
+        thread = QThread(self)
+
+        total_count = len(video_paths)
+        self._loading_dlg = LoadingDialog(
+            self,
+            title="Batch Processing",
+            message=(
+                f"Processing {total_count} video(s)…\n"
+                f"Model: {model_name}   Language: {self.lang_combo.currentText()}\n"
+                "This may take a very long time."
+            ),
+        )
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
+
+        worker.video_started.connect(self._on_batch_video_started)
+        worker.video_step.connect(self._on_batch_video_step)
+        worker.video_progress.connect(self._loading_dlg.set_progress)
+        worker.video_progress.connect(self.progress_bar.setValue)
+        worker.video_done.connect(self._on_batch_video_done)
+        worker.video_failed.connect(self._on_batch_video_failed)
+        worker.batch_done.connect(self._on_batch_done)
+        worker.finished.connect(self._loading_dlg.close)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._worker = worker
+        self._thread = thread
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        thread.start()
+
+        self._loading_dlg.show()
+
+    @Slot(int, int, str)
+    def _on_batch_video_started(self, idx: int, total: int, name: str) -> None:
+        self._set_status(f"Batch {idx}/{total}: {name}")
+        self._loading_dlg.setWindowTitle(f"Batch Processing ({idx}/{total})")
+
+    @Slot(str)
+    def _on_batch_video_step(self, step: str) -> None:
+        current = self.status_label.text()
+        # Preserve the "Batch N/M: name" prefix and append the step
+        if " — " in current:
+            prefix = current.split(" — ")[0]
+        else:
+            prefix = current
+        self._set_status(f"{prefix} — {step}")
+
+    @Slot(int, int, str)
+    def _on_batch_video_done(self, idx: int, total: int, out_path: str) -> None:
+        name = os.path.basename(out_path)
+        self._set_status(f"Batch {idx}/{total}: ✔ {name}")
+
+    @Slot(int, int, str, str)
+    def _on_batch_video_failed(self, idx: int, total: int, name: str, err: str) -> None:
+        import logging as _log
+        _log.getLogger(__name__).error("Batch video %d/%d failed (%s): %s", idx, total, name, err)
+        self._set_status(f"Batch {idx}/{total}: ✘ {name} — {err[:80]}")
+
+    @Slot(int, int)
+    def _on_batch_done(self, succeeded: int, failed: int) -> None:
+        self._was_cancelled = False
+        self.cancel_btn.setText("\U0001f6ab  Cancel")
+        self._set_busy(False)
+        if failed == 0:
+            QMessageBox.information(
+                self, "Batch Complete",
+                f"All {succeeded} video(s) processed successfully."
+            )
+        else:
+            QMessageBox.warning(
+                self, "Batch Complete",
+                f"{succeeded} video(s) succeeded, {failed} video(s) failed.\n"
+                "Check the logs (Help → View Logs) for details."
+            )
 
     @Slot()
     def _on_import_srt_clicked(self) -> None:
