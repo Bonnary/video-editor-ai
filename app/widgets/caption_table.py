@@ -1,16 +1,18 @@
 """Editable caption table widget."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QAction, QColor, QFont, QFontDatabase, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
     QHeaderView,
     QLabel,
+    QMenu,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -57,9 +59,19 @@ class CaptionTable(QWidget):
         super().__init__(parent)
         self._captions: List[Caption] = []
         self._ignore_changes = False
+        self._khmer_font = self._load_khmer_font()
         self._build_ui()
 
     # ------------------------------------------------------------------ build
+    @staticmethod
+    def _load_khmer_font() -> QFont:
+        font_path = Path(__file__).resolve().parent.parent.parent / "fonts" / "Khmer-Regular.ttf"
+        font_id = QFontDatabase.addApplicationFont(str(font_path))
+        families = QFontDatabase.applicationFontFamilies(font_id)
+        if families:
+            return QFont(families[0], 11)
+        return QFont()  # fallback to default
+
     def _build_ui(self) -> None:
         self.table = QTableWidget(0, len(HEADERS))
         self.table.setHorizontalHeaderLabels(HEADERS)
@@ -74,6 +86,9 @@ class CaptionTable(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.itemChanged.connect(self._on_item_changed)
         self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.keyPressEvent = self._table_key_press
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -135,7 +150,7 @@ class CaptionTable(QWidget):
 
     def _set_row(self, row: int, cap: Caption) -> None:
         items = [
-            str(cap.index),
+            str(row + 1),   # display row position, not cap.index (which has gaps after deletion)
             _fmt(cap.start),
             _fmt(cap.end),
             cap.original_text,
@@ -147,6 +162,8 @@ class CaptionTable(QWidget):
             item = QTableWidgetItem(text)
             if col not in _EDITABLE_COLS:
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+            if col == COL_KHMER:
+                item.setFont(self._khmer_font)
             self.table.setItem(row, col, item)
 
         # Voice combo (col 7)
@@ -212,3 +229,35 @@ class CaptionTable(QWidget):
     def _on_cell_clicked(self, row: int, _col: int) -> None:
         if row < len(self._captions):
             self.caption_selected.emit(self._captions[row].start)
+
+    def _table_key_press(self, event) -> None:
+        if event.key() == Qt.Key_Delete:
+            self._delete_selected_rows()
+        else:
+            QTableWidget.keyPressEvent(self.table, event)
+
+    @Slot()
+    def _show_context_menu(self, pos) -> None:
+        rows = {idx.row() for idx in self.table.selectedIndexes()}
+        if not rows:
+            return
+        menu = QMenu(self)
+        label = "Delete row" if len(rows) == 1 else f"Delete {len(rows)} rows"
+        action = QAction(label, self)
+        action.triggered.connect(self._delete_selected_rows)
+        menu.addAction(action)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def _delete_selected_rows(self) -> None:
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for row in rows:
+            if row < len(self._captions):
+                self._captions.pop(row)
+        # Do NOT re-number cap.index — it is the stable key used for TTS file
+        # naming and signal matching. Changing it after TTS has already been
+        # generated (or is about to be) would cause audio files to be written
+        # to wrong paths or matched to the wrong captions.
+        self._rebuild()
+        self.data_changed.emit()

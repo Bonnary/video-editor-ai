@@ -115,14 +115,49 @@ def _run_ffmpeg_node_async(
 # --------------------------------------------------------------------------- #
 
 def _detect_nvenc() -> bool:
-    """Return True if the installed ffmpeg supports h264_nvenc (NVIDIA GPU)."""
+    """
+    Return True only when the installed ffmpeg can actually encode with h264_nvenc.
+
+    Two-stage check:
+      1. Encoder list    → does the ffmpeg build include h264_nvenc?
+      2. Live smoke-test → can the GPU actually initialise the encoder?
+    Stage 2 catches cases where the build has NVENC support but the driver /
+    GPU is absent or misconfigured (the encoder appears in the list but fails
+    at runtime, which would cause the export to error out).
+    """
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=10,
         )
-        return "h264_nvenc" in result.stdout
-    except Exception:
+        combined = result.stdout + result.stderr
+        if "h264_nvenc" not in combined:
+            log.debug("[nvenc-detect] h264_nvenc not in encoder list")
+            return False
+    except Exception as exc:
+        log.warning("[nvenc-detect] encoder-list probe failed: %s", exc)
+        return False
+
+    # Stage 2: quick smoke-test — encode 1 second of a null source
+    try:
+        test = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "nullsrc=s=128x128:d=1",
+                "-vcodec", "h264_nvenc", "-f", "null", "-",
+            ],
+            capture_output=True, timeout=15,
+        )
+        ok = test.returncode == 0
+        log.debug("[nvenc-detect] smoke-test returncode=%d  nvenc=%s", test.returncode, ok)
+        if not ok:
+            log.info(
+                "[nvenc-detect] h264_nvenc smoke-test failed — falling back to CPU.\n%s",
+                test.stderr.decode("utf-8", errors="ignore")[-400:],
+            )
+        return ok
+    except Exception as exc:
+        log.warning("[nvenc-detect] smoke-test failed: %s", exc)
         return False
 
 
@@ -140,6 +175,16 @@ def _nvenc_available() -> bool:
 # --------------------------------------------------------------------------- #
 #  Export
 # --------------------------------------------------------------------------- #
+
+def _get_audio_duration(audio_path: str) -> float:
+    """Return audio file duration in seconds, or 0.0 if probing fails."""
+    try:
+        info = ffmpeg.probe(audio_path)
+        return float(info["format"].get("duration", 0))
+    except Exception as exc:
+        log.warning("[ffmpeg] could not probe audio duration for %s: %s", audio_path, exc)
+        return 0.0
+
 
 def _build_atempo_chain(audio_node, speed: float):
     """
@@ -235,12 +280,38 @@ def _pre_mix_tts_audio(
     for cap in captions:
         if not cap.tts_audio_path or not os.path.exists(cap.tts_audio_path):
             continue
+
+        # Available playback window for this caption (start → end).
+        window = max(0.01, cap.end - cap.effective_start)
+
+        # Probe the actual TTS audio duration so we can auto-fit it.
+        audio_dur = _get_audio_duration(cap.tts_audio_path)
+
+        # If the TTS clip is longer than the window, speed it up just enough
+        # to fit.  Honour any manual cap.speed if it already achieves that.
+        effective_speed = cap.speed
+        if audio_dur > 0 and audio_dur > window:
+            auto_speed = audio_dur / window
+            effective_speed = max(cap.speed, auto_speed)
+            log.debug(
+                "[tts-fit] caption %d: audio=%.3fs  window=%.3fs  "
+                "speed %.2f → %.2f",
+                cap.index, audio_dur, window, cap.speed, effective_speed,
+            )
+
         tts_node = ffmpeg.input(cap.tts_audio_path).audio
-        tts_node = _build_atempo_chain(tts_node, cap.speed)
+        tts_node = _build_atempo_chain(tts_node, effective_speed)
+
+        # Hard-clip: prevent audio from overflowing into adjacent captions.
+        tts_node = tts_node.filter("atrim", duration=window)
+
         delay_ms = int(cap.effective_start * 1000)
         if delay_ms > 0:
             tts_node = tts_node.filter("adelay", f"{delay_ms}|{delay_ms}")
-        tts_node = tts_node.filter("apad")
+
+        # Pad to exactly the video duration so amix sees a finite-length stream.
+        # Without whole_dur, apad is infinite → amix never ends → 20 GB temp file.
+        tts_node = tts_node.filter("apad", whole_dur=duration)
         tts_entries.append((cap.effective_start, tts_node))
 
     if not tts_entries:
@@ -352,10 +423,15 @@ def export_video(
     #  Pass 2: mux video + mixed audio → output                           #
     # ------------------------------------------------------------------ #
 
-    # Input — enable CUDA hw decode when NVENC is available
+    # Input — enable full CUDA pipeline when NVENC is available:
+    #   hwaccel=cuda             → GPU decodes the source video
+    #   hwaccel_output_format=cuda → decoded frames stay in GPU memory
+    # Without hwaccel_output_format, frames are copied back to CPU after decode
+    # then re-uploaded to the GPU for h264_nvenc — this is why GPU shows ~0 %.
     src_kwargs: dict = {}
     if use_nvenc:
         src_kwargs["hwaccel"] = "cuda"
+        src_kwargs["hwaccel_output_format"] = "cuda"
 
     src          = ffmpeg.input(video_path, **src_kwargs)
     video_stream = src.video
