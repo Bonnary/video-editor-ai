@@ -437,16 +437,21 @@ def export_video(
     video_stream = src.video
     orig_audio   = src.audio.filter("volume", original_volume)
 
-    # Optionally mute original audio under TTS segments
+    # Optionally mute original audio under TTS segments.
+    # Build ONE volume filter with a combined enable expression instead of
+    # chaining N filters.  Chaining N filters creates N nested DAG nodes which
+    # causes a RecursionError in ffmpeg-python's topo_sort for long videos.
     if mute_during_captions and has_tts:
-        for cap in captions:
-            if cap.tts_audio_path and os.path.exists(cap.tts_audio_path):
-                s = cap.effective_start
-                e = cap.end
-                orig_audio = orig_audio.filter(
-                    "volume", 0.0,
-                    enable=f"between(t,{s},{e})",
-                )
+        mute_intervals = [
+            (cap.effective_start, cap.end)
+            for cap in captions
+            if cap.tts_audio_path and os.path.exists(cap.tts_audio_path)
+        ]
+        if mute_intervals:
+            enable_expr = "+".join(
+                f"between(t,{s},{e})" for s, e in mute_intervals
+            )
+            orig_audio = orig_audio.filter("volume", 0.0, enable=enable_expr)
 
     # Final audio mix — always just 2 inputs now
     if tmp_tts_path and os.path.exists(tmp_tts_path):
