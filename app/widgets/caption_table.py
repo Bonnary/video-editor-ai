@@ -10,9 +10,11 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QMenu,
+    QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -90,9 +92,25 @@ class CaptionTable(QWidget):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.keyPressEvent = self._table_key_press
 
+        # Voice "Apply to All" toolbar
+        self._voice_all_combo = QComboBox()
+        for label, value in KHMER_VOICES.items():
+            self._voice_all_combo.addItem(label, value)
+        apply_all_btn = QPushButton("Apply to All Rows")
+        apply_all_btn.setFixedHeight(28)
+        apply_all_btn.clicked.connect(self._on_apply_voice_all)
+        voice_bar = QWidget()
+        voice_bar_layout = QHBoxLayout(voice_bar)
+        voice_bar_layout.setContentsMargins(0, 2, 0, 2)
+        voice_bar_layout.addWidget(QLabel("Set voice for all rows:"))
+        voice_bar_layout.addWidget(self._voice_all_combo)
+        voice_bar_layout.addWidget(apply_all_btn)
+        voice_bar_layout.addStretch()
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(QLabel("Captions  (double-click a cell to edit)"))
+        layout.addWidget(voice_bar)
         layout.addWidget(self.table)
 
     # ------------------------------------------------------------------ API
@@ -136,6 +154,33 @@ class CaptionTable(QWidget):
     def clear(self) -> None:
         self._captions = []
         self.table.setRowCount(0)
+
+    def apply_voice_to_all(self, voice_value: str) -> None:
+        """Set every row's voice combo to voice_value."""
+        for row in range(len(self._captions)):
+            combo: QComboBox = self.table.cellWidget(row, COL_VOICE)
+            if combo is not None:
+                idx = combo.findData(voice_value)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        self.data_changed.emit()
+
+    def update_voice(self, caption_index: int, voice: str) -> None:
+        """Update a single caption's voice (called by gender-detect worker)."""
+        row = self._row_for_index(caption_index)
+        if row is None:
+            return
+        if row < len(self._captions):
+            self._captions[row].voice = voice
+        combo: QComboBox = self.table.cellWidget(row, COL_VOICE)
+        if combo is not None:
+            idx = combo.findData(voice)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+    @Slot()
+    def _on_apply_voice_all(self) -> None:
+        self.apply_voice_to_all(self._voice_all_combo.currentData() or DEFAULT_VOICE)
 
     # ------------------------------------------------------------------ internals
     def _rebuild(self) -> None:

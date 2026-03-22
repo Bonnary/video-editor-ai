@@ -27,7 +27,7 @@ from app.widgets.caption_table import CaptionTable
 from app.widgets.loading_dialog import LoadingDialog
 from app.widgets.log_viewer import LogViewerDialog
 from app.widgets.video_player import VideoPlayer
-from app.workers.tts_worker import DEFAULT_VOICE
+from app.workers.tts_worker import DEFAULT_VOICE, KHMER_VOICES
 
 # Resolve logo path relative to this file
 _IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
@@ -80,6 +80,7 @@ class MainWindow(QMainWindow):
         self.tts_btn         = QPushButton("🔊  Generate TTS")
         self.run_all_btn     = QPushButton("🚀  Run All")
         self.export_btn      = QPushButton("💾  Export")
+        self.detect_gender_btn = QPushButton("🎤  Detect Gender")
 
         # Transcription language selector
         TRANSCRIPTION_LANGUAGES = [
@@ -120,7 +121,7 @@ class MainWindow(QMainWindow):
 
         for btn in (self.load_btn, self.batch_folder_btn, self.import_srt_btn,
                     self.transcribe_btn, self.translate_btn, self.tts_btn,
-                    self.run_all_btn, self.export_btn):
+                    self.run_all_btn, self.export_btn, self.detect_gender_btn):
             btn.setFixedHeight(32)
             toolbar.addWidget(btn)
 
@@ -134,6 +135,10 @@ class MainWindow(QMainWindow):
         )
         self.run_all_btn.setToolTip(
             "Run Transcribe → Translate → Generate TTS in one click"
+        )
+        self.detect_gender_btn.setToolTip(
+            "Analyse the original audio for each caption and auto-assign\n"
+            "Male (Piseth) or Female (Sreymom) voice based on speaker pitch."
         )
 
         self.cancel_btn = QPushButton("\U0001f6ab  Cancel")
@@ -149,6 +154,16 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(lang_label)
         toolbar.addWidget(self.lang_combo)
+
+        # Voice selector
+        self.voice_combo = QComboBox()
+        self.voice_combo.setFixedHeight(32)
+        for label, value in KHMER_VOICES.items():
+            self.voice_combo.addItem(label, value)
+        voice_label = QLabel("  Voice: ")
+        toolbar.addSeparator()
+        toolbar.addWidget(voice_label)
+        toolbar.addWidget(self.voice_combo)
 
         # ---- Central splitter ----
         self.video_player   = VideoPlayer()
@@ -172,6 +187,7 @@ class MainWindow(QMainWindow):
         self.run_all_btn.clicked.connect(self._on_run_all_clicked)
         self.export_btn.clicked.connect(self._on_export_clicked)
         self.cancel_btn.clicked.connect(self._on_cancel_clicked)
+        self.detect_gender_btn.clicked.connect(self._on_detect_gender_clicked)
 
         self.caption_table.caption_selected.connect(self.video_player.seek_to)
 
@@ -185,6 +201,58 @@ class MainWindow(QMainWindow):
         layout.addWidget(lbl)
         layout.addWidget(widget, stretch=1)
         return container
+
+    def _apply_default_voice(self, captions: List[Caption]) -> None:
+        """Stamp the currently selected global voice onto every caption."""
+        voice = self.voice_combo.currentData() or DEFAULT_VOICE
+        for cap in captions:
+            cap.voice = voice
+
+    def _start_gender_detection(self) -> None:
+        """Launch GenderDetectWorker on the current captions (non-blocking)."""
+        if not self._video_path:
+            return
+        captions = self.caption_table.get_captions()
+        if not captions:
+            return
+
+        from app.workers.gender_detect_worker import GenderDetectWorker
+
+        self._set_busy(True, "Detecting speaker gender…")
+        worker = GenderDetectWorker(self._video_path, captions)
+        thread = QThread(self)
+
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.voice_detected.connect(self._on_gender_voice_detected)
+        worker.error.connect(self._on_worker_error)
+        worker.finished.connect(self._on_gender_detect_finished)
+
+        self._start_worker(worker, thread)
+
+    @Slot()
+    def _on_detect_gender_clicked(self) -> None:
+        if not self._video_path:
+            self._show_error("Please load a video first.")
+            return
+        self._start_gender_detection()
+
+    @Slot(int, str)
+    def _on_gender_voice_detected(self, caption_index: int, voice: str) -> None:
+        self.caption_table.update_voice(caption_index, voice)
+
+    def _on_gender_detect_finished(self) -> None:
+        was_cancelled = self._was_cancelled
+        self._was_cancelled = False
+        self.cancel_btn.setText("\U0001f6ab  Cancel")
+        if was_cancelled:
+            self._pipeline_running = False
+            self._set_busy(False, "Cancelled.")
+        elif self._pipeline_running:
+            # Chain: gender detection done → start translation
+            self._set_busy(False)
+            self._on_translate_clicked()
+        else:
+            self._set_busy(False, "Gender detection complete.")
 
     def _setup_menu(self) -> None:
         menu      = self.menuBar()
@@ -276,6 +344,7 @@ class MainWindow(QMainWindow):
         self._set_status(status)
         self.lang_combo.setEnabled(not busy)
         self.model_combo.setEnabled(not busy)
+        self.voice_combo.setEnabled(not busy)
         self.cancel_btn.setVisible(busy)
         self.cancel_btn.setEnabled(busy)
         self._update_button_states()
@@ -285,7 +354,7 @@ class MainWindow(QMainWindow):
             # Disable everything while a background job is running
             for btn in (self.load_btn, self.batch_folder_btn, self.import_srt_btn,
                         self.transcribe_btn, self.translate_btn, self.tts_btn,
-                        self.run_all_btn, self.export_btn):
+                        self.run_all_btn, self.export_btn, self.detect_gender_btn):
                 btn.setEnabled(False)
             return
 
@@ -300,6 +369,7 @@ class MainWindow(QMainWindow):
         self.tts_btn.setEnabled(has_captions)
         self.run_all_btn.setEnabled(has_video)
         self.export_btn.setEnabled(has_captions)
+        self.detect_gender_btn.setEnabled(has_video and has_captions)
 
     def _show_error(self, msg: str) -> None:
         QMessageBox.critical(self, "Error", msg)
@@ -502,13 +572,15 @@ class MainWindow(QMainWindow):
             # so TTS and export work without needing to re-translate.
             for cap in raw_captions:
                 cap.khmer_text = cap.original_text
+            self._apply_default_voice(raw_captions)
             self.caption_table.load_captions(raw_captions)
             self._set_status(
                 f"Imported {len(raw_captions)} caption(s) from "
-                f"{os.path.basename(path)} — ready for TTS / Export."
+                f"{os.path.basename(path)} — detecting speaker gender…"
             )
             logger.info("Imported SRT: %s  (%d captions)", path, len(raw_captions))
             self._update_button_states()
+            self._start_gender_detection()
         except Exception as exc:
             self._show_error(f"Failed to import SRT:\n{exc}")
 
@@ -550,19 +622,33 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self.progress_bar.setValue)
         worker.captions_ready.connect(self._on_captions_ready)
         worker.error.connect(self._on_worker_error)
-        worker.finished.connect(self._on_worker_finished)
+        worker.finished.connect(self._on_transcribe_finished)
 
         self._start_worker(worker, thread)
         self._loading_dlg.show()
 
+    def _on_transcribe_finished(self) -> None:
+        """Handle transcription worker finish.
+
+        On success, ``_on_captions_ready`` already started gender detection,
+        which handles the final ``_set_busy(False)``.
+        Here we only clean up for cancel (no captions_ready emitted).
+        Errors are already cleared by ``_on_worker_error``.
+        """
+        if self._was_cancelled:
+            self._was_cancelled = False
+            self.cancel_btn.setText("\U0001f6ab  Cancel")
+            self._pipeline_running = False
+            self._set_busy(False, "Cancelled.")
+
     @Slot(list)
     def _on_captions_ready(self, captions: List[Caption]) -> None:
+        self._apply_default_voice(captions)
         self.caption_table.load_captions(captions)
         self._set_status(f"Transcription complete — {len(captions)} segments.")
         self._update_button_states()
-        if self._pipeline_running:
-            # Chain: transcription done → start translation
-            self._on_translate_clicked()
+        # Auto-detect gender; chains to translate if pipeline is running
+        self._start_gender_detection()
 
     @Slot(int)
     def _on_caption_skipped(self, index: int) -> None:
