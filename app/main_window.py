@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._was_cancelled = False
         self._pipeline_running = False  # True while "Run All" chain is active
+        self._pending_batch: Optional[tuple] = None  # (video_paths, output_dir)
         self._translate_skipped = 0
 
         # Active QThread/worker references (prevent GC)
@@ -419,10 +420,46 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_load_folder_clicked(self) -> None:
-        """Pick an input folder and output folder, then start batch processing."""
-        from app.workers.batch_worker import collect_videos, BatchWorker
+        """Pick an input folder and output folder, then start batch processing.
 
-        # 1. Select input folder
+        Two-step flow:
+          Step 1 – select folders, load first video for overlay preview.
+          Step 2 – (click button again) confirm and start the batch.
+        """
+        from app.workers.batch_worker import collect_videos
+
+        # ── Step 2: pending batch is ready, confirm and launch ──────────────
+        if self._pending_batch is not None:
+            video_paths, output_dir = self._pending_batch
+            overlays = self.video_player.get_overlays()
+            overlay_line = (
+                f"Image overlays: {len(overlays)} configured\n\n"
+                if overlays else
+                "Image overlays: none\n\n"
+            )
+            msg = (
+                f"Found {len(video_paths)} video(s).\n\n"
+                f"Output folder:\n{output_dir}\n\n"
+                f"{overlay_line}"
+                "The full pipeline (Transcribe → Translate → TTS → Export) will run "
+                "automatically for each video.\n\n"
+                "Continue?"
+            )
+            reply = QMessageBox.question(
+                self, "Start Batch Processing", msg,
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            self._pending_batch = None
+            self.batch_folder_btn.setText("📁  Batch Folder")
+            if reply != QMessageBox.Yes:
+                return
+
+            model_name = self.model_combo.currentData() or "auto"
+            language   = self.lang_combo.currentData() or "zh"
+            self._start_batch_worker(video_paths, output_dir, overlays, model_name, language)
+            return
+
+        # ── Step 1: select folders, load preview, wait for user ─────────────
         input_dir = QFileDialog.getExistingDirectory(
             self, "Select Input Folder (videos)", ""
         )
@@ -438,31 +475,31 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 2. Select output folder
         output_dir = QFileDialog.getExistingDirectory(
             self, "Select Output Folder", input_dir
         )
         if not output_dir:
             return
 
-        # 3. Confirm
-        msg = (
-            f"Found {len(video_paths)} video(s) in:\n{input_dir}\n\n"
-            f"Output folder:\n{output_dir}\n\n"
-            "The full pipeline (Transcribe → Translate → TTS → Export) will run "
-            "automatically for each video.\n\n"
-            "Continue?"
+        # Load first video so the user can preview and configure overlays
+        self._load_video(video_paths[0])
+        self._pending_batch = (video_paths, output_dir)
+        self.batch_folder_btn.setText("▶  Start Batch")
+        self._set_status(
+            f"Batch ready ({len(video_paths)} video(s)). "
+            "Add image overlays if needed, then click  ▶ Start Batch."
         )
-        reply = QMessageBox.question(
-            self, "Start Batch Processing", msg,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
-        )
-        if reply != QMessageBox.Yes:
-            return
 
-        # 4. Start batch worker
-        model_name = self.model_combo.currentData() or "auto"
-        language   = self.lang_combo.currentData() or "zh"
+    def _start_batch_worker(
+        self,
+        video_paths: list,
+        output_dir: str,
+        overlays: list,
+        model_name: str,
+        language: str,
+    ) -> None:
+        """Wire up and launch the BatchWorker."""
+        from app.workers.batch_worker import BatchWorker
 
         self._set_busy(True, f"Batch: 0 / {len(video_paths)} — Loading model…")
 
@@ -471,7 +508,7 @@ class MainWindow(QMainWindow):
             output_dir=output_dir,
             model_name=model_name,
             language=language,
-            image_overlays=self.video_player.get_overlays(),
+            image_overlays=overlays,
         )
         thread = QThread(self)
 
