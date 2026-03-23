@@ -96,15 +96,17 @@ class BatchWorker(QObject):
         language: str = "zh",
         voice: str = DEFAULT_VOICE,
         image_overlays=None,
+        transcription_source: str = "local",
     ):
         super().__init__()
-        self._video_paths    = video_paths
-        self._output_dir     = output_dir
-        self._model_name     = model_name
-        self._language       = language
-        self._voice          = voice
-        self._image_overlays = image_overlays or []
-        self._cancelled      = False
+        self._video_paths           = video_paths
+        self._output_dir            = output_dir
+        self._model_name            = model_name
+        self._language              = language
+        self._voice                 = voice
+        self._image_overlays        = image_overlays or []
+        self._transcription_source  = transcription_source
+        self._cancelled             = False
 
     # ------------------------------------------------------------------ public
     def cancel(self) -> None:
@@ -118,23 +120,24 @@ class BatchWorker(QObject):
         failed    = 0
 
         logger.info(
-            "BatchWorker starting — %d video(s)  model=%s  lang=%s",
-            total, self._model_name, self._language,
+            "BatchWorker starting — %d video(s)  source=%s  model=%s  lang=%s",
+            total, self._transcription_source, self._model_name, self._language,
         )
 
-        # Load Whisper model once and reuse across all videos
+        # Load Whisper model once (only for local transcription)
         whisper_model = None
-        try:
-            self.video_step.emit("Loading Whisper model…")
-            from main import load_model  # from libs/whisper/main.py
-            whisper_model, device = load_model(self._model_name)
-            logger.info("Whisper model loaded on device=%s", device)
-        except Exception as exc:
-            logger.error("Failed to load Whisper model: %s", exc)
-            self.video_failed.emit(0, total, "", f"Failed to load Whisper model: {exc}")
-            self.batch_done.emit(0, total)
-            self.finished.emit()
-            return
+        if self._transcription_source != "deepinfra":
+            try:
+                self.video_step.emit("Loading Whisper model…")
+                from main import load_model  # from libs/whisper/main.py
+                whisper_model, device = load_model(self._model_name)
+                logger.info("Whisper model loaded on device=%s", device)
+            except Exception as exc:
+                logger.error("Failed to load Whisper model: %s", exc)
+                self.video_failed.emit(0, total, "", f"Failed to load Whisper model: {exc}")
+                self.batch_done.emit(0, total)
+                self.finished.emit()
+                return
 
         for idx, video_path in enumerate(self._video_paths, start=1):
             if self._cancelled:
@@ -188,23 +191,80 @@ class BatchWorker(QObject):
             self.video_step.emit("Transcribing…")
             self._emit_progress(5)
 
-            result   = whisper_model.transcribe(
-                video_path,
-                language=self._language,
-                verbose=False,
-                word_timestamps=False,
-                fp16=False,   # safe default; GPU transcription still works
-            )
-            segments = result.get("segments", [])
-            captions: List[Caption] = [
-                Caption(
-                    index=i,
-                    start=float(s["start"]),
-                    end=float(s["end"]),
-                    original_text=s["text"].strip(),
+            if self._transcription_source == "deepinfra":
+                from app.workers.deepinfra_transcribe_worker import (
+                    _extract_audio_mp3,
+                    _group_words,
+                    _load_api_key,
                 )
-                for i, s in enumerate(segments, start=1)
-            ]
+                import requests as _requests
+                import tempfile as _tempfile
+
+                api_key = _load_api_key()
+                if not api_key:
+                    raise RuntimeError(
+                        "DeepInfra API key not found.\n"
+                        "Add  DEEPINFRA_API_KEY=<your-key>  to the .env file."
+                    )
+                tmp_fd, tmp_mp3 = _tempfile.mkstemp(suffix=".mp3", prefix="di_batch_")
+                os.close(tmp_fd)
+                try:
+                    _extract_audio_mp3(video_path, tmp_mp3)
+                    with open(tmp_mp3, "rb") as af:
+                        response = _requests.post(
+                            "https://api.deepinfra.com/v1/openai/audio/transcriptions",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            data={
+                                "model":                     "openai/whisper-large-v3",
+                                "language":                  self._language,
+                                "response_format":           "verbose_json",
+                                "timestamp_granularities[]": "word",
+                            },
+                            files={"file": ("audio.mp3", af, "audio/mpeg")},
+                            timeout=300,
+                        )
+                    if response.status_code != 200:
+                        raise RuntimeError(
+                            f"DeepInfra API error {response.status_code}:\n{response.text[:500]}"
+                        )
+                    data  = response.json()
+                    words = data.get("words") or []
+                    if words:
+                        segments_out = _group_words(words, self._language)
+                    else:
+                        raw_segs = data.get("segments") or []
+                        segments_out = [
+                            (float(s["start"]), float(s["end"]), s.get("text", "").strip())
+                            for s in raw_segs
+                        ]
+                finally:
+                    try:
+                        os.remove(tmp_mp3)
+                    except OSError:
+                        pass
+                captions: List[Caption] = [
+                    Caption(index=i, start=start, end=end, original_text=text)
+                    for i, (start, end, text) in enumerate(segments_out, start=1)
+                    if text
+                ]
+            else:
+                result   = whisper_model.transcribe(
+                    video_path,
+                    language=self._language,
+                    verbose=False,
+                    word_timestamps=False,
+                    fp16=False,
+                )
+                segments = result.get("segments", [])
+                captions = [
+                    Caption(
+                        index=i,
+                        start=float(s["start"]),
+                        end=float(s["end"]),
+                        original_text=s["text"].strip(),
+                    )
+                    for i, s in enumerate(segments, start=1)
+                ]
             logger.info(
                 "[%d/%d] Transcribed %d segments from %s",
                 idx, total, len(captions), video_name,

@@ -505,6 +505,7 @@ dependencies = [
     { name = "openai-whisper" },
     { name = "pyinstaller" },
     { name = "pyside6" },
+    { name = "requests" },
     { name = "setuptools-rust" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10' and sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -528,6 +529,7 @@ requires-dist = [
     { name = "openai-whisper" },
     { name = "pyinstaller" },
     { name = "pyside6" },
+    { name = "requests" },
     { name = "setuptools-rust" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", index = "https://download.pytorch.org/whl/cu126" },
@@ -1741,12 +1743,12 @@ dependencies = [
     { name = "torch", version = "2.8.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:dcec92ca53fd7ec1cf0257f15b127542f0d49855d5580578b14337fcc015f8af" },
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp310-cp310-win_amd64.whl", hash = "sha256:6fc06bb1d5b3be2061eafe03cff9d9040e51d900097b2f779844ae319c0f0cc3" },
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:77859ec6c6a92ca3b666a3f02363a5631e9676c027fb4dce99a461a089c9962c" },
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp311-cp311-win_amd64.whl", hash = "sha256:48e19338f6fd24588cd5608b21087d00b80e30ddf054d9ce83f792a4b0025d7f" },
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:f6a11a57d8d2244cad082e5698acca955f800fa0d493ddf3cf04aafdaeab4683" },
-    { url = "https://download.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp39-cp39-win_amd64.whl", hash = "sha256:d7ea145845d848dd0ffac46d974d448a3fc6440b74c3856a3df3181c44d8a633" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:dcec92ca53fd7ec1cf0257f15b127542f0d49855d5580578b14337fcc015f8af" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp310-cp310-win_amd64.whl", hash = "sha256:6fc06bb1d5b3be2061eafe03cff9d9040e51d900097b2f779844ae319c0f0cc3" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:77859ec6c6a92ca3b666a3f02363a5631e9676c027fb4dce99a461a089c9962c" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp311-cp311-win_amd64.whl", hash = "sha256:48e19338f6fd24588cd5608b21087d00b80e30ddf054d9ce83f792a4b0025d7f" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:f6a11a57d8d2244cad082e5698acca955f800fa0d493ddf3cf04aafdaeab4683" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchaudio-2.8.0%2Bcu126-cp39-cp39-win_amd64.whl", hash = "sha256:d7ea145845d848dd0ffac46d974d448a3fc6440b74c3856a3df3181c44d8a633" },
 ]
 
 [[package]]
@@ -1803,12 +1805,12 @@ dependencies = [
     { name = "torch", version = "2.8.0+cu126", source = { registry = "https://download.pytorch.org/whl/cu126" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 wheels = [
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:29750c7b2236e1714823b3441a64c498d84366672c9f09a87d72bd2be8867080" },
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp310-cp310-win_amd64.whl", hash = "sha256:089d3fbeabf273a7f138c7fa2486289313ec57b002a4856f47eba52dace35e96" },
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:b697f5ca72399822d6454929cfb8835298527881e0ba58982f80ff0401331a92" },
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp311-cp311-win_amd64.whl", hash = "sha256:921ec706184a4b79190483724d439fb2f769b4cde83e3031a7b7ac097676a63b" },
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:78c0f4422dd63205176092e787f4c8d736c6fa5df08f99a33e319b274fa95438" },
-    { url = "https://download.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp39-cp39-win_amd64.whl", hash = "sha256:25fd7da08cd95d02549a160b22f530227e25b28330b6069aff8c301eb6f25932" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:29750c7b2236e1714823b3441a64c498d84366672c9f09a87d72bd2be8867080" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp310-cp310-win_amd64.whl", hash = "sha256:089d3fbeabf273a7f138c7fa2486289313ec57b002a4856f47eba52dace35e96" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:b697f5ca72399822d6454929cfb8835298527881e0ba58982f80ff0401331a92" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp311-cp311-win_amd64.whl", hash = "sha256:921ec706184a4b79190483724d439fb2f769b4cde83e3031a7b7ac097676a63b" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp39-cp39-manylinux_2_28_x86_64.whl", hash = "sha256:78c0f4422dd63205176092e787f4c8d736c6fa5df08f99a33e319b274fa95438" },
+    { url = "https://download-r2.pytorch.org/whl/cu126/torchvision-0.23.0%2Bcu126-cp39-cp39-win_amd64.whl", hash = "sha256:25fd7da08cd95d02549a160b22f530227e25b28330b6069aff8c301eb6f25932" },
 ]
 
 [[package]]

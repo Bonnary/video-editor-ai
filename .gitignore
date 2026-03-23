@@ -4,3 +4,4 @@ dist
 build
 app.log.*
 app.log
+.env

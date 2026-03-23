@@ -148,13 +148,28 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(self.cancel_btn)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(model_label)
-        toolbar.addWidget(self.model_combo)
+        # ---- Toolbar row 2: selectors ----
+        self.addToolBarBreak()
+        toolbar2 = QToolBar("Options Toolbar", self)
+        toolbar2.setMovable(False)
+        self.addToolBar(toolbar2)
 
-        toolbar.addSeparator()
-        toolbar.addWidget(lang_label)
-        toolbar.addWidget(self.lang_combo)
+        # Source selector (Local Whisper / DeepInfra API)
+        self.source_combo = QComboBox()
+        self.source_combo.setFixedHeight(32)
+        self.source_combo.addItem("🖥  Local Whisper", "local")
+        self.source_combo.addItem("☁  DeepInfra API", "deepinfra")
+        source_label = QLabel("  Source: ")
+        toolbar2.addWidget(source_label)
+        toolbar2.addWidget(self.source_combo)
+
+        toolbar2.addSeparator()
+        self._model_label_action = toolbar2.addWidget(model_label)
+        self._model_combo_action = toolbar2.addWidget(self.model_combo)
+
+        toolbar2.addSeparator()
+        toolbar2.addWidget(lang_label)
+        toolbar2.addWidget(self.lang_combo)
 
         # Voice selector
         self.voice_combo = QComboBox()
@@ -162,9 +177,9 @@ class MainWindow(QMainWindow):
         for label, value in KHMER_VOICES.items():
             self.voice_combo.addItem(label, value)
         voice_label = QLabel("  Voice: ")
-        toolbar.addSeparator()
-        toolbar.addWidget(voice_label)
-        toolbar.addWidget(self.voice_combo)
+        toolbar2.addSeparator()
+        toolbar2.addWidget(voice_label)
+        toolbar2.addWidget(self.voice_combo)
 
         # ---- Central splitter ----
         self.video_player   = VideoPlayer()
@@ -191,6 +206,7 @@ class MainWindow(QMainWindow):
         self.detect_gender_btn.clicked.connect(self._on_detect_gender_clicked)
 
         self.caption_table.caption_selected.connect(self.video_player.seek_to)
+        self.source_combo.currentIndexChanged.connect(self._on_source_changed)
 
     @staticmethod
     def _wrap_with_label(widget: QWidget, title: str) -> QWidget:
@@ -208,6 +224,13 @@ class MainWindow(QMainWindow):
         voice = self.voice_combo.currentData() or DEFAULT_VOICE
         for cap in captions:
             cap.voice = voice
+
+    @Slot(int)
+    def _on_source_changed(self, index: int) -> None:
+        """Show/hide Whisper model selector based on chosen transcription source."""
+        is_local = (self.source_combo.currentData() == "local")
+        self._model_label_action.setVisible(is_local)
+        self._model_combo_action.setVisible(is_local)
 
     def _start_gender_detection(self) -> None:
         """Launch GenderDetectWorker on the current captions (non-blocking)."""
@@ -346,6 +369,7 @@ class MainWindow(QMainWindow):
         self.lang_combo.setEnabled(not busy)
         self.model_combo.setEnabled(not busy)
         self.voice_combo.setEnabled(not busy)
+        self.source_combo.setEnabled(not busy)
         self.cancel_btn.setVisible(busy)
         self.cancel_btn.setEnabled(busy)
         self._update_button_states()
@@ -456,7 +480,8 @@ class MainWindow(QMainWindow):
 
             model_name = self.model_combo.currentData() or "auto"
             language   = self.lang_combo.currentData() or "zh"
-            self._start_batch_worker(video_paths, output_dir, overlays, model_name, language)
+            source     = self.source_combo.currentData() or "local"
+            self._start_batch_worker(video_paths, output_dir, overlays, model_name, language, source)
             return
 
         # ── Step 1: select folders, load preview, wait for user ─────────────
@@ -497,11 +522,13 @@ class MainWindow(QMainWindow):
         overlays: list,
         model_name: str,
         language: str,
+        transcription_source: str = "local",
     ) -> None:
         """Wire up and launch the BatchWorker."""
         from app.workers.batch_worker import BatchWorker
 
-        self._set_busy(True, f"Batch: 0 / {len(video_paths)} — Loading model…")
+        source_label = "DeepInfra API" if transcription_source == "deepinfra" else f"Whisper [{model_name}]"
+        self._set_busy(True, f"Batch: 0 / {len(video_paths)} — Loading {source_label}…")
 
         worker = BatchWorker(
             video_paths=video_paths,
@@ -509,6 +536,7 @@ class MainWindow(QMainWindow):
             model_name=model_name,
             language=language,
             image_overlays=overlays,
+            transcription_source=transcription_source,
         )
         thread = QThread(self)
 
@@ -637,6 +665,13 @@ class MainWindow(QMainWindow):
         if not self._video_path:
             return
 
+        source = self.source_combo.currentData() or "local"
+        if source == "deepinfra":
+            self._start_deepinfra_transcription()
+        else:
+            self._start_local_transcription()
+
+    def _start_local_transcription(self) -> None:
         from app.workers.transcribe_worker import TranscribeWorker
 
         model_name = self.model_combo.currentData() or "auto"
@@ -647,11 +682,37 @@ class MainWindow(QMainWindow):
         worker = TranscribeWorker(self._video_path, model_name=model_name, language=language)
         thread = QThread(self)
 
-        # Loading popup
         self._loading_dlg = LoadingDialog(
             self,
             title="Whisper Transcription",
             message=f"Transcribing audio with Whisper…\nModel: {model_name}\nLanguage: {lang_label}\nThis may take a while.",
+        )
+        worker.progress.connect(self._loading_dlg.set_progress)
+        worker.finished.connect(self._loading_dlg.close)
+        self._loading_dlg.cancel_requested.connect(self._on_cancel_clicked)
+
+        worker.progress.connect(self.progress_bar.setValue)
+        worker.captions_ready.connect(self._on_captions_ready)
+        worker.error.connect(self._on_worker_error)
+        worker.finished.connect(self._on_transcribe_finished)
+
+        self._start_worker(worker, thread)
+        self._loading_dlg.show()
+
+    def _start_deepinfra_transcription(self) -> None:
+        from app.workers.deepinfra_transcribe_worker import DeepInfraTranscribeWorker
+
+        language   = self.lang_combo.currentData() or "zh"
+        lang_label = self.lang_combo.currentText()
+        self._set_busy(True, "Transcribing with DeepInfra Whisper API…")
+
+        worker = DeepInfraTranscribeWorker(self._video_path, language=language)
+        thread = QThread(self)
+
+        self._loading_dlg = LoadingDialog(
+            self,
+            title="DeepInfra Transcription",
+            message=f"Transcribing with DeepInfra Whisper API…\nLanguage: {lang_label}\nThis may take a while.",
         )
         worker.progress.connect(self._loading_dlg.set_progress)
         worker.finished.connect(self._loading_dlg.close)

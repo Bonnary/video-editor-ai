@@ -9,6 +9,7 @@ dependencies = [
     "torch",                  # PyTorch core (CUDA build on Win/Linux; MPS-capable build on macOS — see [tool.uv.sources])
     "torchvision",            # computer vision utilities
     "torchaudio",             # audio processing utilities
+    "requests",               # HTTP client for DeepInfra API
     "edge-tts",               # Khmer TTS (Microsoft Edge Neural voices)
     "pyside6",                # Qt6 UI framework
     "ffmpeg-python",          # FFmpeg Python bindings for export
