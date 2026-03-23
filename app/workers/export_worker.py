@@ -43,6 +43,7 @@ class ExportWorker(QObject):
         output_video_path: str,
         original_volume: float = 0.3,
         mute_during_captions: bool = False,
+        image_overlays=None,
     ):
         super().__init__()
         self._video_path           = video_path
@@ -50,6 +51,7 @@ class ExportWorker(QObject):
         self._output_video_path    = output_video_path
         self._original_volume      = original_volume
         self._mute_during_captions = mute_during_captions
+        self._image_overlays       = image_overlays or []
         self._cancelled            = False
 
     def cancel(self) -> None:
@@ -85,6 +87,7 @@ class ExportWorker(QObject):
                 original_volume=self._original_volume,
                 mute_during_captions=self._mute_during_captions,
                 progress_callback=lambda pct: self.progress.emit(5 + int(pct * 0.95)),
+                image_overlays=self._image_overlays,
             )
 
             logger.info("ExportWorker done — %s", self._output_video_path)

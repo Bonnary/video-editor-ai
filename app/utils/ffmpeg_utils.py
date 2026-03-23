@@ -210,6 +210,37 @@ def _build_atempo_chain(audio_node, speed: float):
     return node
 
 
+def _apply_image_overlays(video_stream, overlays: list, video_w: int, video_h: int):
+    """Chain ffmpeg overlay filters for each ImageOverlay onto *video_stream*.
+
+    Each overlay image is scaled to its target pixel dimensions then composited
+    on top of the video using the ``overlay`` filter.  Works with both opaque
+    (JPEG) and transparent (PNG) images.
+
+    Note: the caller must ensure *video_stream* contains CPU-format frames
+    (i.e. do **not** set ``hwaccel_output_format=cuda`` on the source input).
+    """
+    for ov in overlays:
+        x_px = int(round(ov.x_pct * video_w))
+        y_px = int(round(ov.y_pct * video_h))
+        w_px = max(1, int(round(ov.w_pct * video_w)))
+        h_px = max(1, int(round(ov.h_pct * video_h)))
+
+        img_scaled = ffmpeg.input(ov.image_path).video.filter("scale", w=w_px, h=h_px)
+        video_stream = ffmpeg.filter(
+            [video_stream, img_scaled],
+            "overlay",
+            x=x_px,
+            y=y_px,
+            format="auto",   # handles both yuv and rgb overlay images
+        )
+        log.debug(
+            "[overlay] %s  pos=(%d,%d)  size=(%dx%d)",
+            ov.image_path, x_px, y_px, w_px, h_px,
+        )
+    return video_stream
+
+
 def _run_ffmpeg_mix_batch(
     audio_streams: list,
     duration: float,
@@ -363,6 +394,7 @@ def export_video(
     original_volume: float = 0.3,
     mute_during_captions: bool = False,
     progress_callback=None,
+    image_overlays=None,
 ) -> None:
     """
     Render the final video:
@@ -392,6 +424,7 @@ def export_video(
         original_volume:        volume multiplier for the original audio track.
         mute_during_captions:   if True, silence orig audio during dubbed segments.
         progress_callback:      optional callable(int 0-100) for progress.
+        image_overlays:         optional list of ImageOverlay to render on the video.
     """
     duration  = get_video_duration(video_path)
     use_nvenc = _nvenc_available()
@@ -428,14 +461,29 @@ def export_video(
     #   hwaccel_output_format=cuda → decoded frames stay in GPU memory
     # Without hwaccel_output_format, frames are copied back to CPU after decode
     # then re-uploaded to the GPU for h264_nvenc — this is why GPU shows ~0 %.
+    #
+    # Exception: when image overlays are present the CPU-based ``overlay``
+    # filter requires frames in host memory, so hwaccel_output_format must be
+    # omitted (GPU encode still works via automatic frame upload in nvenc).
+    has_overlays = bool(image_overlays)
     src_kwargs: dict = {}
-    if use_nvenc:
+    if use_nvenc and not has_overlays:
         src_kwargs["hwaccel"] = "cuda"
         src_kwargs["hwaccel_output_format"] = "cuda"
 
     src          = ffmpeg.input(video_path, **src_kwargs)
     video_stream = src.video
     orig_audio   = src.audio.filter("volume", original_volume)
+
+    # Apply image overlays (CPU filter — needs non-CUDA frame format)
+    if has_overlays:
+        info = get_video_info(video_path)
+        video_stream = _apply_image_overlays(
+            video_stream, image_overlays, info["width"], info["height"]
+        )
+        # The overlay filter may output yuv444p (from PNG alpha handling).
+        # libx264 high profile only supports yuv420p — force the conversion.
+        video_stream = video_stream.filter("format", "yuv420p")
 
     # Optionally mute original audio under TTS segments.
     # Build ONE volume filter with a combined enable expression instead of

@@ -102,26 +102,39 @@ def format_timestamp(seconds: float) -> str:
     milliseconds -= secs * 1_000
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
-# Model VRAM requirements in GB (with safety buffer)
+# Model VRAM requirements in GB for fp16 inference on CUDA (with safety buffer).
+# Whisper uses fp16 automatically on CUDA, so actual usage is ~half the raw
+# checkpoint size.  These figures include activation/KV-cache headroom.
 MODEL_VRAM_REQUIREMENTS = {
-    "tiny":   1.0,
-    "base":   1.0,
-    "small":  2.0,
-    "medium": 5.0,
-    "large":  10.0,
+    "tiny":           1.0,
+    "base":           1.0,
+    "small":          2.0,
+    "medium":         3.5,
+    "large":          4.5,
+    "large-v1":       4.5,
+    "large-v2":       4.5,
+    "large-v3":       4.5,
+    "turbo":          2.0,
+    "large-v3-turbo": 2.0,
 }
 
 def auto_select_model(vram_gb: float) -> str:
     """
     Automatically select the best Whisper model that fits in available VRAM.
-    Uses 80% of total VRAM as usable budget to leave headroom for other GPU ops.
+    Uses 85% of total VRAM as usable budget to leave headroom for other GPU ops.
     """
-    usable_vram = vram_gb * 0.80
+    usable_vram = vram_gb * 0.85
     # Iterate from best to worst, pick the first that fits
-    for model in ["large", "medium", "small", "base", "tiny"]:
+    for model in ["large-v3", "large-v2", "large", "medium", "small", "base", "tiny"]:
         if MODEL_VRAM_REQUIREMENTS[model] <= usable_vram:
             return model
     return "tiny"  # fallback
+
+# Module-level cache — reuse the loaded model across multiple transcriptions.
+_cached_model       = None
+_cached_model_name  = None
+_cached_device      = None
+
 
 def load_model(model_name: str = "auto"):
     """
@@ -188,8 +201,16 @@ def load_model(model_name: str = "auto"):
             print("ℹ️  No NVIDIA GPU detected — using CPU")
 
         elif not _cuda_runtime_present():
-            # CUDA not installed — user was already warned at startup.
-            print("ℹ️  CUDA runtime not found — using CPU")
+            # ctypes didn't find system CUDA DLLs, but PyTorch bundles its own
+            # CUDA runtime in torch/lib/ (not in system PATH), so torch.cuda
+            # may still work — try it before giving up.
+            try:
+                if torch.cuda.is_available():
+                    device = "cuda"
+                else:
+                    print("ℹ️  CUDA runtime not found — using CPU")
+            except Exception as exc:
+                print(f"ℹ️  CUDA check failed ({exc}) — using CPU")
 
         else:
             # Both GPU and CUDA runtime confirmed — safe to call torch.cuda.
@@ -215,10 +236,10 @@ def load_model(model_name: str = "auto"):
         if model_name == "auto":
             model_name = auto_select_model(vram_gb)
             print(f"🤖 Auto-selected model: '{model_name}' "
-                  f"(fits in {vram_gb * 0.8:.1f} GB usable VRAM)")
+                  f"(fits in {vram_gb * 0.85:.1f} GB usable VRAM)")
         else:
             required = MODEL_VRAM_REQUIREMENTS.get(model_name, 0)
-            usable   = vram_gb * 0.80
+            usable   = vram_gb * 0.85
             if required > usable:
                 suggested = auto_select_model(vram_gb)
                 print(f"⚠️  '{model_name}' needs ~{required} GB but only "
@@ -243,8 +264,16 @@ def load_model(model_name: str = "auto"):
             print("⚠️  'large' on CPU will be very slow. "
                   "Consider 'medium' or 'small'.")
 
+    global _cached_model, _cached_model_name, _cached_device
+    if _cached_model is not None and _cached_model_name == model_name and _cached_device == device:
+        print(f"♻️  Reusing cached Whisper model: '{model_name}' on {device}")
+        return _cached_model, _cached_device
+
     print(f"📦 Loading Whisper model: '{model_name}'…")
     model = whisper.load_model(model_name, device=device)
+    _cached_model = model
+    _cached_model_name = model_name
+    _cached_device = device
     return model, device
 
 

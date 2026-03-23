@@ -120,8 +120,8 @@ class MainWindow(QMainWindow):
         model_label = QLabel("  Whisper model: ")
 
         for btn in (self.load_btn, self.batch_folder_btn, self.import_srt_btn,
-                    self.transcribe_btn, self.translate_btn, self.tts_btn,
-                    self.run_all_btn, self.export_btn, self.detect_gender_btn):
+                    self.transcribe_btn, self.translate_btn, self.detect_gender_btn,
+                    self.tts_btn, self.run_all_btn, self.export_btn):
             btn.setFixedHeight(32)
             toolbar.addWidget(btn)
 
@@ -471,6 +471,7 @@ class MainWindow(QMainWindow):
             output_dir=output_dir,
             model_name=model_name,
             language=language,
+            image_overlays=self.video_player.get_overlays(),
         )
         thread = QThread(self)
 
@@ -770,6 +771,7 @@ class MainWindow(QMainWindow):
             output_video_path=out_path,
             original_volume=1.0,
             mute_during_captions=True,
+            image_overlays=self.video_player.get_overlays(),
         )
         thread = QThread(self)
 

@@ -95,14 +95,16 @@ class BatchWorker(QObject):
         model_name: str = "auto",
         language: str = "zh",
         voice: str = DEFAULT_VOICE,
+        image_overlays=None,
     ):
         super().__init__()
-        self._video_paths = video_paths
-        self._output_dir  = output_dir
-        self._model_name  = model_name
-        self._language    = language
-        self._voice       = voice
-        self._cancelled   = False
+        self._video_paths    = video_paths
+        self._output_dir     = output_dir
+        self._model_name     = model_name
+        self._language       = language
+        self._voice          = voice
+        self._image_overlays = image_overlays or []
+        self._cancelled      = False
 
     # ------------------------------------------------------------------ public
     def cancel(self) -> None:
@@ -209,7 +211,22 @@ class BatchWorker(QObject):
             )
             self._emit_progress(25)
 
-            # ---- Step 2: Translate ------------------------------------------
+            # ---- Step 2: Detect speaker gender -----------------------------
+            if self._cancelled:
+                raise InterruptedError("Cancelled")
+            self.video_step.emit("Detecting speaker gender…")
+
+            from app.workers.gender_detect_worker import detect_caption_voices
+            detect_caption_voices(
+                video_path,
+                captions,
+                cancelled_fn=lambda: self._cancelled,
+                progress_fn=lambda pct: self._emit_progress(25 + int(pct * 0.05)),
+            )
+            logger.info("[%d/%d] Gender detection done for %s", idx, total, video_name)
+            self._emit_progress(30)
+
+            # ---- Step 3: Translate ------------------------------------------
             if self._cancelled:
                 raise InterruptedError("Cancelled")
             self.video_step.emit("Translating to Khmer…")
@@ -239,12 +256,12 @@ class BatchWorker(QObject):
                         "[%d/%d] Caption %d skipped (all translation attempts failed)",
                         idx, total, cap.index,
                     )
-                # Progress: 25 → 55 across translation
-                self._emit_progress(25 + int((ci + 1) / cap_total * 30))
+                # Progress: 30 → 55 across translation
+                self._emit_progress(30 + int((ci + 1) / cap_total * 25))
 
             logger.info("[%d/%d] Translation done for %s", idx, total, video_name)
 
-            # ---- Step 3: Generate TTS --------------------------------------
+            # ---- Step 4: Generate TTS --------------------------------------
             if self._cancelled:
                 raise InterruptedError("Cancelled")
             self.video_step.emit("Generating TTS audio…")
@@ -285,7 +302,7 @@ class BatchWorker(QObject):
 
             logger.info("[%d/%d] TTS done for %s", idx, total, video_name)
 
-            # ---- Step 4: Export --------------------------------------------
+            # ---- Step 5: Export --------------------------------------------
             if self._cancelled:
                 raise InterruptedError("Cancelled")
             self.video_step.emit("Exporting video…")
@@ -308,6 +325,7 @@ class BatchWorker(QObject):
                 original_volume=1.0,
                 mute_during_captions=True,
                 progress_callback=_export_progress,
+                image_overlays=self._image_overlays,
             )
 
             self._emit_progress(100)
