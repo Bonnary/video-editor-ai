@@ -492,7 +492,8 @@ class MainWindow(QMainWindow):
             model_name = self.model_combo.currentData() or "auto"
             language   = self.lang_combo.currentData() or "zh"
             source     = self.source_combo.currentData() or "local"
-            self._start_batch_worker(video_paths, output_dir, overlays, model_name, language, source)
+            self._start_batch_worker(video_paths, output_dir, overlays, model_name, language, source,
+                                     tts_only=self.tts_only_chk.isChecked())
             return
 
         # ── Step 1: select folders, load preview, wait for user ─────────────
@@ -534,6 +535,7 @@ class MainWindow(QMainWindow):
         model_name: str,
         language: str,
         transcription_source: str = "local",
+        tts_only: bool = False,
     ) -> None:
         """Wire up and launch the BatchWorker."""
         from app.workers.batch_worker import BatchWorker
@@ -548,6 +550,7 @@ class MainWindow(QMainWindow):
             language=language,
             image_overlays=overlays,
             transcription_source=transcription_source,
+            tts_only=tts_only,
         )
         thread = QThread(self)
 

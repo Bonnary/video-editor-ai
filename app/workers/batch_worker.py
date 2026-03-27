@@ -97,6 +97,7 @@ class BatchWorker(QObject):
         voice: str = DEFAULT_VOICE,
         image_overlays=None,
         transcription_source: str = "local",
+        tts_only: bool = False,
     ):
         super().__init__()
         self._video_paths           = video_paths
@@ -106,6 +107,7 @@ class BatchWorker(QObject):
         self._voice                 = voice
         self._image_overlays        = image_overlays or []
         self._transcription_source  = transcription_source
+        self._tts_only              = tts_only
         self._cancelled             = False
 
     # ------------------------------------------------------------------ public
@@ -382,8 +384,8 @@ class BatchWorker(QObject):
                 video_path=video_path,
                 captions=captions,
                 output_video_path=out_video,
-                original_volume=1.0,
-                mute_during_captions=True,
+                original_volume=0.0 if self._tts_only else 1.0,
+                mute_during_captions=not self._tts_only,
                 progress_callback=_export_progress,
                 image_overlays=self._image_overlays,
             )
