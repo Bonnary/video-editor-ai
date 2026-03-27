@@ -1,7 +1,6 @@
 """QThread worker: transcribe a video using the DeepInfra Whisper API.
 
-Requests word-level timestamps and regroups them into short captions
-comparable to local Whisper output (≤5 s / ≤12 words per segment).
+Uses segment-level timestamps from the API to create captions.
 API key is read from the project .env file (DEEPINFRA_API_KEY=...).
 """
 from __future__ import annotations
@@ -21,11 +20,6 @@ logger = logging.getLogger(__name__)
 
 _API_URL = "https://api.deepinfra.com/v1/openai/audio/transcriptions"
 _MODEL   = "openai/whisper-large-v3"
-
-# Regrouping tunables
-_MAX_SEG_DURATION = 5.0   # seconds — split segment if longer
-_MAX_SEG_WORDS    = 12    # words   — split segment if more words
-_GAP_THRESHOLD    = 0.5   # seconds — natural pause → always split here
 
 
 def _load_api_key() -> str:
@@ -58,61 +52,6 @@ def _extract_audio_mp3(video_path: str, out_mp3: str) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg audio extraction failed:\n{result.stderr[-1000:]}")
-
-
-def _group_words(words: list, language: str) -> List[tuple]:
-    """Group word-level dicts into (start, end, text) caption tuples.
-
-    Splitting rules (whichever triggers first):
-    - Gap between words > _GAP_THRESHOLD  → always split
-    - Segment duration  > _MAX_SEG_DURATION
-    - Word count        >= _MAX_SEG_WORDS
-    """
-    segments: List[tuple] = []
-    current: list = []
-    seg_start: float | None = None
-
-    for w in words:
-        w_start = float(w.get("start") or 0)
-        w_end   = float(w.get("end")   or w_start + 0.3)
-        w_text  = w.get("word", "").strip()
-        if not w_text:
-            continue
-
-        if seg_start is None:
-            seg_start = w_start
-            current   = [w]
-        else:
-            prev_end = float(current[-1].get("end") or current[-1].get("start") or 0)
-            gap      = w_start - prev_end
-            duration = w_end - seg_start
-
-            split = (
-                gap      >= _GAP_THRESHOLD
-                or duration > _MAX_SEG_DURATION
-                or len(current) >= _MAX_SEG_WORDS
-            )
-            if split:
-                text = _words_to_text(current, language)
-                segments.append((seg_start, prev_end, text))
-                seg_start = w_start
-                current   = [w]
-            else:
-                current.append(w)
-
-    if current and seg_start is not None:
-        prev_end = float(current[-1].get("end") or current[-1].get("start") or 0)
-        text = _words_to_text(current, language)
-        segments.append((seg_start, prev_end, text))
-
-    return segments
-
-
-def _words_to_text(words: list, language: str) -> str:
-    """Join word tokens.  Chinese/Japanese/Thai skip spaces."""
-    no_space_langs = {"zh", "ja", "th", "ko"}
-    sep = "" if language in no_space_langs else " "
-    return sep.join(w.get("word", "").strip() for w in words).strip()
 
 
 class DeepInfraTranscribeWorker(QObject):
@@ -170,17 +109,16 @@ class DeepInfraTranscribeWorker(QObject):
             if self._cancelled:
                 return
 
-            # Step 2: call API with word-level timestamps
+            # Step 2: call API with segment-level timestamps
             logger.info("Calling DeepInfra Whisper API…")
             with open(tmp_mp3, "rb") as audio_file:
                 response = requests.post(
                     _API_URL,
                     headers={"Authorization": f"Bearer {api_key}"},
                     data={
-                        "model":                     _MODEL,
-                        "language":                  self._language,
-                        "response_format":           "verbose_json",
-                        "timestamp_granularities[]": "word",
+                        "model":           _MODEL,
+                        "language":        self._language,
+                        "response_format": "verbose_json",
                     },
                     files={"file": ("audio.mp3", audio_file, "audio/mpeg")},
                     timeout=300,
@@ -197,19 +135,13 @@ class DeepInfraTranscribeWorker(QObject):
                 return
 
             data  = response.json()
-            words = data.get("words") or []
+            raw_segs = data.get("segments") or []
 
-            # Fall back to segments if no word-level data returned
-            if not words:
-                logger.warning("No word-level timestamps returned; falling back to segments")
-                raw_segs = data.get("segments") or []
-                segments_out = [
-                    (float(s["start"]), float(s["end"]), s.get("text", "").strip())
-                    for s in raw_segs
-                ]
-            else:
-                logger.info("Received %d word timestamps — regrouping…", len(words))
-                segments_out = _group_words(words, self._language)
+            logger.info("Processing %d segments…", len(raw_segs))
+            segments_out = [
+                (float(s["start"]), float(s["end"]), s.get("text", "").strip())
+                for s in raw_segs
+            ]
 
             logger.info("Produced %d caption segments", len(segments_out))
             captions: List[Caption] = []

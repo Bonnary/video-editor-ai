@@ -8,6 +8,7 @@ from typing import List, Optional
 from PySide6.QtCore import QObject, QThread, Qt, Slot
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QIcon, QKeySequence
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QLabel,
@@ -180,6 +181,15 @@ class MainWindow(QMainWindow):
         toolbar2.addSeparator()
         toolbar2.addWidget(voice_label)
         toolbar2.addWidget(self.voice_combo)
+
+        # TTS-only export option
+        self.tts_only_chk = QCheckBox("TTS Only")
+        self.tts_only_chk.setChecked(False)
+        self.tts_only_chk.setToolTip(
+            "When checked, export with TTS audio only — original video audio is muted completely."
+        )
+        toolbar2.addSeparator()
+        toolbar2.addWidget(self.tts_only_chk)
 
         # ---- Central splitter ----
         self.video_player   = VideoPlayer()
@@ -370,6 +380,7 @@ class MainWindow(QMainWindow):
         self.model_combo.setEnabled(not busy)
         self.voice_combo.setEnabled(not busy)
         self.source_combo.setEnabled(not busy)
+        self.tts_only_chk.setEnabled(not busy)
         self.cancel_btn.setVisible(busy)
         self.cancel_btn.setEnabled(busy)
         self._update_button_states()
@@ -861,14 +872,15 @@ class MainWindow(QMainWindow):
 
         from app.workers.export_worker import ExportWorker
 
+        tts_only = self.tts_only_chk.isChecked()
         self._set_busy(True, "Exporting video with dubbed audio…")
 
         worker = ExportWorker(
             video_path=self._video_path,
             captions=captions,
             output_video_path=out_path,
-            original_volume=1.0,
-            mute_during_captions=True,
+            original_volume=0.0 if tts_only else 1.0,
+            mute_during_captions=not tts_only,
             image_overlays=self.video_player.get_overlays(),
         )
         thread = QThread(self)
