@@ -1,9 +1,12 @@
 """Video preview widget with playback controls and interactive image overlay editor."""
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 from typing import List
 
-from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QUrl, Slot
+from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt, QThread, QUrl, Signal, Slot
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -22,6 +25,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSlider,
@@ -30,6 +35,37 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.image_overlay import ImageOverlay
+
+
+class _TranscodeWorker(QThread):
+    """Transcodes an AV1 video to H264 in a temp file for preview."""
+    finished = Signal(str)   # emits temp file path on success
+    failed   = Signal(str)   # emits error message on failure
+
+    def __init__(self, src: str, parent=None) -> None:
+        super().__init__(parent)
+        self._src = src
+        self._tmp: str | None = None
+
+    def run(self) -> None:
+        fd, tmp = tempfile.mkstemp(suffix="_preview.mp4")
+        os.close(fd)
+        self._tmp = tmp
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", self._src,
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+            "-c:a", "copy",
+            tmp,
+        ]
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=300)
+            if r.returncode == 0:
+                self.finished.emit(tmp)
+            else:
+                self.failed.emit(r.stderr.decode(errors="replace")[-300:])
+        except Exception as e:
+            self.failed.emit(str(e))
 
 
 def _ms_to_hms(ms: int) -> str:
@@ -221,13 +257,16 @@ class VideoPlayer(QWidget):
 
     Overlay images can be added, dragged, and resized directly on the video
     preview.  Call ``get_overlays()`` to retrieve the current overlay list
-    (normalised to 0–1 fractions of the video dimensions) for use in the
+    (normalized to 0-1 fractions of the video dimensions) for use in the
     ffmpeg export pipeline.
     """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._video_size = QSizeF(1280, 720)
+        self._preview_tmp: str | None = None   # temp H264 for AV1 previews
+        self._transcode_worker: _TranscodeWorker | None = None
+        self._transcode_progress: QProgressDialog | None = None
         self._build_ui()
         self._connect_signals()
 
@@ -322,8 +361,78 @@ class VideoPlayer(QWidget):
 
     def load(self, path: str) -> None:
         """Load and immediately preview (but don't autoplay) a video file."""
+        # Clean up any previous temp preview file
+        self._cleanup_preview_tmp()
+
+        if self._detect_av1(path):
+            self._start_av1_transcode(path)
+        else:
+            self._load_source(path)
+
+    def _load_source(self, path: str) -> None:
         self.player.setSource(QUrl.fromLocalFile(path))
-        self.player.pause()  # show first frame
+        self.player.pause()
+
+    def _detect_av1(self, path: str) -> bool:
+        try:
+            r = subprocess.run(
+                [
+                    "ffprobe", "-v", "quiet",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_name",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    path,
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            return r.stdout.strip().lower() == "av1"
+        except Exception:
+            return False
+
+    def _start_av1_transcode(self, path: str) -> None:
+        dlg = QProgressDialog(
+            "AV1 video detected — converting for preview…",
+            "Cancel", 0, 0, self,
+        )
+        dlg.setWindowTitle("Converting Preview")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        self._transcode_progress = dlg
+
+        worker = _TranscodeWorker(path, self)
+        worker.finished.connect(self._on_transcode_done)
+        worker.failed.connect(self._on_transcode_failed)
+        dlg.canceled.connect(worker.terminate)
+        self._transcode_worker = worker
+        worker.start()
+
+    @Slot(str)
+    def _on_transcode_done(self, tmp_path: str) -> None:
+        if self._transcode_progress:
+            self._transcode_progress.close()
+            self._transcode_progress = None
+        self._preview_tmp = tmp_path
+        self._load_source(tmp_path)
+
+    @Slot(str)
+    def _on_transcode_failed(self, err: str) -> None:
+        if self._transcode_progress:
+            self._transcode_progress.close()
+            self._transcode_progress = None
+        QMessageBox.warning(
+            self, "Preview Conversion Failed",
+            f"Could not convert AV1 video for preview:\n{err}\n\n"
+            "Transcription, TTS, and export still work correctly via FFmpeg.",
+        )
+
+    def _cleanup_preview_tmp(self) -> None:
+        if self._preview_tmp and os.path.exists(self._preview_tmp):
+            try:
+                os.remove(self._preview_tmp)
+            except OSError:
+                pass
+        self._preview_tmp = None
 
     def seek_to(self, seconds: float) -> None:
         """Jump to a position in seconds."""
